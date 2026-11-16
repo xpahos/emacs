@@ -104,6 +104,68 @@
 
 (defun my-wta-sha (char) (make-string 40 char))
 
+(ert-deftest my-wta-delete-with-ordinary-buffers-reaches-confirmation ()
+  (my-wta-test
+   (with-temp-buffer
+     (setq default-directory copy-dir major-mode 'go-ts-mode)
+     (rename-buffer "wta-source.go" t)
+     (should-not (my-pi-live-p (current-buffer)))
+     (setq major-mode 'dired-mode)
+     (should-not (my-pi-live-p (current-buffer)))
+     (let (asked)
+       (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) (setq asked t) nil))
+                 ((symbol-function 'my-wt-delete) (lambda (&rest _) (ert-fail "Deletion was not confirmed"))))
+         (my-wt-picker-delete (my-wt-copy "c1"))
+         (should asked))))))
+
+(defmacro my-wta-client (&rest body)
+  "Run BODY with a real ACP transport to cat, without starting an AI session."
+  `(let* ((agent (generate-new-buffer "wta-client"))
+          (default-directory copy-dir)
+          (client (acp-make-client :command "cat" :context-buffer agent)))
+     (unwind-protect
+         (progn
+           (acp--start-client :client client)
+           (with-current-buffer agent
+             (setq major-mode 'agent-shell-mode default-directory copy-dir)
+             (setq-local agent-shell--state (list (cons :client client) (cons :tool-calls nil))
+                         shell-maker--config (make-shell-maker-config :name "agent")
+                         shell-maker--busy nil))
+           ,@body)
+       (acp-shutdown :client client)
+       (when (buffer-live-p agent) (kill-buffer agent)))))
+
+(ert-deftest my-wta-delete-allows-idle-agent-stderr ()
+  (my-wta-test
+   (my-wta-client
+    (should (my-pi-live-p agent))
+    (should (eq (agent-shell-status :shell-buffer agent) 'ready))
+    (should-not (my-wt-delete-blockers (my-wt-copy "c1"))))))
+
+(ert-deftest my-wta-delete-still-blocks-busy-and-blocked-agents ()
+  (my-wta-test
+   (my-wta-client
+    (with-current-buffer agent (setq shell-maker--busy t))
+    (dolist (blocked '(nil t))
+      (with-current-buffer agent
+        (map-put! agent-shell--state :tool-calls
+                  (when blocked '(("tool" . ((:permission-request-id . "permission")))))))
+      (should (eq (agent-shell-status :shell-buffer agent) (if blocked 'blocked 'busy)))
+      (should (seq-some (lambda (reason) (string-match-p "An agent task is running" reason))
+                        (my-wt-delete-blockers (my-wt-copy "c1"))))))))
+
+(ert-deftest my-wta-delete-still-blocks-unowned-stderr-process ()
+  (my-wta-test
+   (my-wta-client
+    (with-temp-buffer
+      (rename-buffer "acp-client-stderr(unowned)" t)
+      (setq default-directory copy-dir)
+      (let ((process (make-pipe-process :name "unowned stderr" :buffer (current-buffer) :noquery t)))
+        (unwind-protect
+            (should (seq-some (lambda (reason) (string-match-p "Processes still run there:.*unowned stderr" reason))
+                              (my-wt-delete-blockers (my-wt-copy "c1"))))
+          (delete-process process)))))))
+
 (ert-deftest my-wta-live-prompt-requires-confirmation-on-branch-change ()
   (my-wta-test
    (should (advice-member-p #'my-pi-guard-submit 'shell-maker-submit))

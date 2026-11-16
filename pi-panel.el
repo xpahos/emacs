@@ -150,9 +150,20 @@
 (defun my-pi-live-p (buffer)
   (and (buffer-live-p buffer)
        (with-current-buffer buffer
-         (when-let* ((client (map-elt (agent-shell--state) :client))
+         (when-let* (((derived-mode-p 'agent-shell-mode))
+                     (client (map-elt (agent-shell--state) :client))
                      (process (map-elt client :process)))
            (process-live-p process)))))
+
+(defun my-pi-stderr-process (buffer)
+  "Return the stderr process belonging to the live agent in BUFFER."
+  (with-current-buffer buffer
+    (let ((client (map-elt (agent-shell--state) :client)))
+      ;; ACP names this buffer by client instance but exposes no stderr accessor.
+      (when-let* ((stderr (get-buffer (format "acp-client-stderr(%s)-%s"
+                                              (map-elt client :command)
+                                              (map-elt client :instance-count)))))
+        (get-buffer-process stderr)))))
 
 (defun my-pi-history-refresh (root &optional done)
   (my-pi-history-cancel (gethash root my-pi-refreshes))

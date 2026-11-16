@@ -524,7 +524,10 @@ Return (:occupied COPY) when an existing registered copy already has the branch.
 
 (defun my-wt-delete-blockers (copy &optional recheck)
   "Reasons why COPY cannot be deleted; RECHECK skips state checks during deletion."
-  (let ((buffers (my-wt-copy-buffers copy)) blockers)
+  (let* ((buffers (my-wt-copy-buffers copy))
+         (agents (cl-remove-if-not (lambda (b) (and (fboundp 'my-pi-live-p) (my-pi-live-p b))) buffers))
+         (agent-stderr (delq nil (mapcar #'my-pi-stderr-process agents)))
+         blockers)
     (unless (equal (plist-get copy :role) "copy") (push "The original working directory is never deleted" blockers))
     (unless (equal (plist-get copy :owned) 1) (push "This copy was not created by Emacs" blockers))
     (unless recheck
@@ -533,13 +536,12 @@ Return (:occupied COPY) when an existing registered copy already has the branch.
       (when (gethash (plist-get copy :copy_id) my-wt-busy) (push "Another operation is running" blockers)))
     (when-let* ((dirty (cl-remove-if-not (lambda (b) (and (buffer-file-name b) (buffer-modified-p b))) buffers)))
       (push (format "Unsaved buffers: %s" (mapconcat #'buffer-name dirty ", ")) blockers))
-    (when-let* ((agents (cl-remove-if-not (lambda (b) (and (fboundp 'my-pi-live-p) (my-pi-live-p b)
-                                                          (memq (agent-shell-status :shell-buffer b) '(busy blocked))))
-                                          buffers)))
-      (push (format "An agent task is running in %s; stop the task first" (mapconcat #'buffer-name agents ", ")) blockers))
+    (when-let* ((busy (cl-remove-if-not (lambda (b) (memq (agent-shell-status :shell-buffer b) '(busy blocked))) agents)))
+      (push (format "An agent task is running in %s; stop the task first" (mapconcat #'buffer-name busy ", ")) blockers))
     (when-let* ((others (cl-remove-if-not
                          (lambda (p) (and (process-live-p p) (memq (process-buffer p) buffers)
                                           (not (process-get p 'my-wt-releasable))
+                                          (not (memq p agent-stderr))
                                           (not (with-current-buffer (process-buffer p)
                                                  (or (derived-mode-p 'agent-shell-mode)
                                                      (bound-and-true-p eglot--managed-mode))))))
@@ -555,16 +557,25 @@ Return (:occupied COPY) when an existing registered copy already has the branch.
         (tab-bar-select-tab (1+ (tab-bar--tab-index tab)))
         (my-wt-switch (my-wt-original (plist-get copy :project_id)))))
     (tab-bar-select-tab (1+ current))
-    (when (fboundp 'eglot--servers-by-project)
+    (when (boundp 'eglot--servers-by-project)
       (maphash (lambda (project servers)
                  (when (file-in-directory-p (project-root project) root)
-                   (dolist (server servers) (ignore-errors (eglot-shutdown server)))))
+                   (dolist (server servers) (eglot-shutdown server))))
                eglot--servers-by-project))
     (dolist (buffer (my-wt-copy-buffers copy))
       (unless (and (buffer-file-name buffer) (buffer-modified-p buffer))
-        (let ((kill-buffer-query-functions nil)) (kill-buffer buffer))))
+        (let ((kill-buffer-query-functions nil)) (quit-windows-on buffer t))))
     (remhash (plist-get copy :directory) my-wt-states)
     (project-forget-project (plist-get copy :directory))))
+
+(defun my-wt-release-step (copy)
+  "Release COPY's editor resources, reporting errors to the deletion chain."
+  (lambda (next)
+    (funcall next
+             (condition-case failure
+                 (progn (my-wt-release copy) nil)
+               ((error quit) (format "Could not release editor resources: %s"
+                                     (error-message-string failure)))))))
 
 (defun my-wt-git-delete-steps (copy)
   (let ((root (directory-file-name (plist-get copy :vcs_root)))
@@ -582,7 +593,7 @@ Return (:occupied COPY) when an existing registered copy already has the branch.
      (my-wt-step root "git" '("rev-list" "-n" "1" "HEAD" "--not" "--branches" "--remotes" "--tags")
        (lambda (out) (unless (string-empty-p (string-trim out))
                        "HEAD has commits that no branch, tag or remote keeps")))
-     (lambda (next) (my-wt-release copy) (funcall next))
+     (my-wt-release-step copy)
      (my-wt-step main "git" (list "worktree" "remove" root)))))
 
 (defun my-wt-arc-delete-steps (copy)
@@ -630,7 +641,7 @@ Return (:occupied COPY) when an existing registered copy already has the branch.
                                           (my-wt-arc-unpublished-error (list name)))))))
                     behind)
             next))))
-     (lambda (next) (my-wt-release copy) (funcall next))
+     (my-wt-release-step copy)
      ;; Run from outside the mount; a failure is reported, never followed by rm -r.
      (my-wt-step base arc (list "unmount" "--forget" root)))))
 
