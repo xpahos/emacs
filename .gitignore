@@ -17,6 +17,7 @@ __pycache__/
 \#*\#
 .#*
 .DS_Store
+node_modules/
 /auto-save-list/
 /project-files/
 /tabsession.el
@@ -24,3 +25,4 @@ __pycache__/
 /projects.eld
 /treemacs-persist
 /tramp
+/pi/

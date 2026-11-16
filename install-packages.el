@@ -10,3 +10,13 @@
 (dolist (package '(treemacs treemacs-tab-bar tabspaces dashboard magit diff-hl))
   (unless (package-installed-p package)
     (package-install package)))
+
+(require 'markdown-ts-mode)
+(let ((grammar-directory
+       (expand-file-name "tree-sitter" (file-name-directory load-file-name))))
+  (add-to-list 'treesit-extra-load-path grammar-directory)
+  (dolist (language '(markdown markdown-inline))
+    (unless (treesit-language-available-p language)
+      (treesit-install-language-grammar language grammar-directory))
+    (unless (treesit-language-available-p language)
+      (error "Markdown grammar installation failed: %s" language))))

@@ -1,6 +1,7 @@
 ;;; arcadia.el --- Arc integration and line gutters -*- lexical-binding: t; -*-
 
-(add-to-list 'load-path (file-name-directory load-file-name))
+;; Remove the config root left on load-path by older versions of this file.
+(setq load-path (delete (file-name-directory load-file-name) load-path))
 (add-to-list 'load-path
              (expand-file-name "vendor/arcit" (file-name-directory load-file-name)))
 (load (expand-file-name "vc-arc.el" (file-name-directory load-file-name)) nil t)
@@ -115,6 +116,9 @@
       (_ (vc-dir (or root default-directory) backend)))))
 
 (global-set-key (kbd "C-c v") #'my-vcs-status)
+
+(load (expand-file-name "line-blame.el" (file-name-directory load-file-name)) nil t)
+(global-set-key (kbd "C-c b") #'line-blame-mode)
 
 (dolist (buffer (buffer-list))
   (with-current-buffer buffer

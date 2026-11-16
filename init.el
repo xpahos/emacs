@@ -62,7 +62,9 @@
   (load (expand-file-name "arcadia.el" config-directory) nil t)
   (load (expand-file-name "project-search.el" config-directory) nil t)
   (load (expand-file-name "overview.el" config-directory) nil t)
-  (load (expand-file-name "modified-state.el" config-directory) nil t))
+  (load (expand-file-name "modified-state.el" config-directory) nil t)
+  (load (expand-file-name "markdown-view.el" config-directory) nil t)
+  (load (expand-file-name "pi-panel.el" config-directory) nil t))
 
 ;; Separate edges leave the current tab open at the bottom.
 (dolist (face '(tab-bar tab-line tab-line-active tab-line-inactive
