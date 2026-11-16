@@ -5,9 +5,7 @@
 (require 'find-dired)
 (require 'cl-lib)
 
-(defvar my-project-search-cache (make-hash-table :test #'equal))
 (defvar my-project-search-history nil)
-(clrhash my-project-search-cache)
 
 (defun my-project-search-source (root)
   "Return (BASE PROGRAM . ARGS) for listing files below ROOT."
@@ -15,12 +13,9 @@
                    "-type" "d" "-name" ".git" "-prune" "-o" "-type" "f" "-print0")))
 
 (defun my-project-read-file (root)
-  "Choose a file under ROOT while its index is loaded asynchronously."
+  "Choose a file under ROOT while a fresh file list is loaded asynchronously."
   (let* ((source (my-project-search-source root))
          (default-directory (car source))
-         (cached (gethash root my-project-search-cache))
-         (ready (and cached (< (- (float-time) (car cached)) 600)))
-         (files (and ready (cadr cached)))
          (completion-styles '(substring))
          (completion-category-defaults nil)
          (completion-category-overrides nil)
@@ -29,36 +24,33 @@
          (icomplete-show-matches-on-no-input nil)
          (icomplete-minibuffer-setup-hook '(icomplete--vertical-minibuffer-setup))
          (active t)
-         process output errors minibuffer failure selected)
+         ready files process output errors minibuffer failure selected)
     (unwind-protect
         (progn
-          (unless ready
-            (setq output (generate-new-buffer " *project-files*")
-                  errors (generate-new-buffer " *project-files-errors*"))
-            (setq process
-                  (make-process
-                   :name "project-files" :buffer output :stderr errors
-                   :command (cdr source) :connection-type 'pipe :noquery t :file-handler t
-                   :sentinel
-                   (lambda (proc _event)
-                     (when (and active (memq (process-status proc) '(exit signal)))
-                       (setq ready t)
-                       (if (zerop (process-exit-status proc))
-                           (progn
-                             (setq files
-                                   (with-current-buffer output
-                                     (split-string (buffer-string) "\0" t)))
-                             (puthash root (list (float-time) files) my-project-search-cache))
-                         (unless failure
-                           (setq failure (format "File indexing failed (exit %s): %s"
-                                                 (process-exit-status proc)
-                                                 (with-current-buffer errors
-                                                   (string-trim (buffer-string)))))))
-                       (when (and (buffer-live-p minibuffer)
-                                  (eq (window-buffer (active-minibuffer-window)) minibuffer))
-                         (with-selected-window (active-minibuffer-window)
-                           (setq completion-all-sorted-completions nil)
-                           (if failure (exit-minibuffer) (icomplete-exhibit)))))))))
+          (setq output (generate-new-buffer " *project-files*")
+                errors (generate-new-buffer " *project-files-errors*"))
+          (setq process
+                (make-process
+                 :name "project-files" :buffer output :stderr errors
+                 :command (cdr source) :connection-type 'pipe :noquery t :file-handler t
+                 :sentinel
+                 (lambda (proc _event)
+                   (when (and active (memq (process-status proc) '(exit signal)))
+                     (setq ready t)
+                     (if (zerop (process-exit-status proc))
+                         (setq files
+                               (with-current-buffer output
+                                 (split-string (buffer-string) "\0" t)))
+                       (unless failure
+                         (setq failure (format "File indexing failed (exit %s): %s"
+                                               (process-exit-status proc)
+                                               (with-current-buffer errors
+                                                 (string-trim (buffer-string)))))))
+                     (when (and (buffer-live-p minibuffer)
+                                (eq (window-buffer (active-minibuffer-window)) minibuffer))
+                       (with-selected-window (active-minibuffer-window)
+                         (setq completion-all-sorted-completions nil)
+                         (if failure (exit-minibuffer) (icomplete-exhibit))))))))
           (setq selected
                 (minibuffer-with-setup-hook
                     (lambda ()
@@ -88,21 +80,19 @@
       (when (buffer-live-p output) (kill-buffer output))
       (when (buffer-live-p errors) (kill-buffer errors)))))
 
-(defun my-project-find-file (&optional refresh)
-  "Find a file under the tab's folder or current directory.
-With REFRESH, clear the cached file list first."
-  (interactive "P")
+(defun my-project-find-file ()
+  "Find a file under the tab's folder or current directory using a fresh list."
+  (interactive)
   (let* ((root (or (alist-get 'my-project-root (tab-bar--current-tab)) default-directory))
          (editor (if (window-parameter (selected-window) 'window-side)
                      (seq-find (lambda (w) (not (window-dedicated-p w))) (window-list))
                    (selected-window)))
          file)
-    (when refresh (remhash root my-project-search-cache))
     (setq file (save-window-excursion (my-project-read-file root)))
     (unless (and (stringp file) (not (string-empty-p file)) (file-regular-p file))
       (user-error "Select an existing file, not a directory"))
     (when (window-live-p editor) (select-window editor))
     (find-file file)))
 
-(global-set-key (kbd "C-x p f") #'my-project-find-file)
+(global-set-key (kbd "C-c p o") #'my-project-find-file)
 (provide 'my-project-search)

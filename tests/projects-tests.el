@@ -30,6 +30,44 @@
          (tab-bar-close-tab (length (tab-bar-tabs))))
        (delete-directory test-root t))))
 
+(ert-deftest my-project-copy-path-uses-active-workspace-root ()
+  (my-test-projects
+   (my-project-open test-root)
+   (let* ((directory (expand-file-name "nested/" test-root))
+          (file (expand-file-name "file with spaces.txt" directory))
+          (kill-ring nil)
+          (interprogram-cut-function nil))
+     (make-directory directory)
+     (project-remember-project (cons 'transient directory))
+     (find-file file)
+     (my-copy-file-path)
+     (should (equal (current-kill 0) file))
+     (my-copy-project-relative-path)
+     (should (equal (current-kill 0) "nested/file with spaces.txt")))))
+
+(ert-deftest my-project-copy-path-falls-back-to-file-project ()
+  (my-test-projects
+   (project-remember-project (cons 'transient test-root))
+   (find-file (expand-file-name "notes.txt" test-root))
+   (let ((kill-ring nil)
+         (interprogram-cut-function nil))
+     (my-copy-project-relative-path)
+     (should (equal (current-kill 0) "notes.txt")))))
+
+(ert-deftest my-project-copy-path-rejects-missing-file-or-project ()
+  (my-test-projects
+   (let ((kill-ring '("keep"))
+         (interprogram-cut-function nil))
+     (with-temp-buffer
+       (should-error (my-copy-file-path) :type 'user-error)
+       (should-error (my-copy-project-relative-path) :type 'user-error))
+     (should (equal kill-ring '("keep")))
+     (find-file (expand-file-name "standalone.txt" test-root))
+     (my-copy-file-path)
+     (should (equal (current-kill 0) buffer-file-name))
+     (should-error (my-copy-project-relative-path) :type 'user-error)
+     (should (equal (current-kill 0) buffer-file-name)))))
+
 (ert-deftest my-project-explicit-root-and-no-repository-writes ()
   (my-test-projects
    (let ((root (expand-file-name "mono/service/" test-root)))

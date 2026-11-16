@@ -1,7 +1,37 @@
 ;;; overview-tests.el --- Whole-file marker checks -*- lexical-binding: t; -*-
 (require 'ert)
 (require 'cl-lib)
+(require 'package)
+(let ((package-user-dir "/Volumes/Sources/emacs/elpa"))
+  (package-initialize))
+(require 'diff-hl)
 (load "/Volumes/Sources/emacs/overview.el" nil t)
+
+(ert-deftest my-overview-mirrors-real-diff-hl-markers ()
+  (with-temp-buffer
+    (dotimes (i 100) (insert (format "line %d\n" (1+ i))))
+    (let ((diff-hl-fallback-to-margin nil))
+      (diff-hl--update-overlays
+       '((10 3 0 insert) (40 2 2 change) (80 0 1 delete) (99 2 0 insert)
+         (101 0 1 delete)) nil))
+    (let ((marks (cdr (my-overview-data))))
+      (should (equal (mapcar (lambda (mark) (cl-subseq mark 0 3)) marks)
+                     '((10 12 insert) (40 41 change) (80 80 delete)
+                       (99 100 insert) (101 101 delete))))
+      (dolist (overlay (overlays-in (point-min) (point-max)))
+        (when-let* ((spec (overlay-get overlay 'before-string))
+                    (display (get-text-property 0 'display spec))
+                    (type (car (rassq (nth 2 display)
+                                     '((insert . diff-hl-insert)
+                                       (change . diff-hl-change)
+                                       (delete . diff-hl-delete))))))
+          (let ((line (line-number-at-pos (overlay-start overlay))))
+            (should (seq-some (lambda (mark)
+                                (and (eq (nth 2 mark) type)
+                                     (<= (car mark) line (cadr mark))))
+                              marks)))))
+      (diff-hl-remove-overlays)
+      (should-not (cdr (my-overview-data))))))
 
 (ert-deftest my-overview-collects-diagnostics-and-hunks-outside-narrowing ()
   (with-temp-buffer

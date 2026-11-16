@@ -64,6 +64,28 @@
   (seq-filter #'buffer-file-name
               (my-project-tab-buffers (tab-bar--current-tab))))
 
+(defun my-copy-file-path (&optional relative)
+  "Copy the current file's absolute path, or project-relative with RELATIVE."
+  (interactive "P")
+  (unless buffer-file-name
+    (user-error "This buffer is not visiting a file"))
+  (let* ((file (expand-file-name buffer-file-name))
+         (path
+          (if relative
+              (let ((root (or (alist-get 'my-project-root (tab-bar--current-tab))
+                              (when-let* ((project (project-current nil)))
+                                (project-root project)))))
+                (unless root (user-error "This file has no project"))
+                (file-relative-name file root))
+            file)))
+    (kill-new path)
+    (message "Copied path: %s" path)))
+
+(defun my-copy-project-relative-path ()
+  "Copy the current file's path relative to the active project root."
+  (interactive)
+  (my-copy-file-path t))
+
 (defun my-project-files-state-file (root)
   "Return the private file list location for canonical project ROOT."
   (expand-file-name (concat "project-files/" (secure-hash 'sha256 root) ".eld")
@@ -274,6 +296,8 @@
 (global-set-key (kbd "C-x p p") #'my-project-switch)
 (global-set-key (kbd "C-c h") #'my-project-home)
 (global-set-key (kbd "C-c q") #'tab-bar-close-tab)
+(global-set-key (kbd "C-c p f") #'my-copy-file-path)
+(global-set-key (kbd "C-c p r") #'my-copy-project-relative-path)
 (global-set-key (kbd "<f8>") #'treemacs)
 (define-key tabspaces-command-map (kbd "o") #'my-project-open)
 (define-key tabspaces-command-map (kbd "k") #'tab-bar-close-tab)

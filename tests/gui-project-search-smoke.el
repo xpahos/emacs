@@ -14,7 +14,6 @@
              (origin (get-buffer-create "*search-origin*")))
         (switch-to-buffer origin)
         (setf (alist-get 'my-project-root (cdr (tab-bar--current-tab-find))) root)
-        (clrhash my-project-search-cache)
         (dolist (query '("cloud/compute/go/common/pkg/hw/pci/class.go"
                          "go/common/pkg/hw/pci/class.go"
                          "common/pkg/hw/pci/class.go"))
@@ -27,13 +26,14 @@
                             (run-with-timer
                              0.1 0.1
                              (lambda ()
-                               (when (and (gethash root my-project-search-cache)
-                                          (active-minibuffer-window))
-                                 (cancel-timer driver)
+                               (when (active-minibuffer-window)
                                  (with-selected-window (active-minibuffer-window)
-                                   (icomplete-exhibit)
-                                   (call-interactively (key-binding (kbd "RET")))))))))
-                  (call-interactively (key-binding (kbd "C-x p f"))))
+                                   (when (test-completion expected minibuffer-completion-table
+                                                          minibuffer-completion-predicate)
+                                     (cancel-timer driver)
+                                     (icomplete-exhibit)
+                                     (call-interactively (key-binding (kbd "RET"))))))))))
+                  (call-interactively (key-binding (kbd "C-c p o"))))
               (when (timerp driver) (cancel-timer driver))))
           (cl-assert (equal buffer-file-name expected))
           (cl-assert (= (length (window-list)) 1)))
@@ -41,7 +41,7 @@
           (condition-case nil
               (minibuffer-with-setup-hook
                   (lambda () (run-at-time 0.05 nil #'abort-recursive-edit))
-                (my-project-find-file t))
+                (my-project-find-file))
             (quit nil))
           (cl-assert (eq before (current-buffer)))
           (cl-assert (= (length (window-list)) 1))
@@ -52,7 +52,7 @@
         (let ((before (current-buffer)) reported)
           (cl-letf (((symbol-function 'my-project-search-source)
                      (lambda (_) '("/private/tmp/" "/bin/sh" "-c" "exit 7"))))
-            (condition-case nil (my-project-find-file t)
+            (condition-case nil (my-project-find-file)
               (user-error (setq reported t))))
           (cl-assert reported)
           (cl-assert (eq before (current-buffer)))
