@@ -65,6 +65,9 @@
           (should (eq (selected-frame) parent))
           (should (eq (selected-window) source))
           (should (= (length my-overview-views) 1))
+          ;; Reloading project/UI settings must not put project tabs in the narrow stripe.
+          (tab-bar-mode 1)
+          (should (zerop (frame-parameter (my-overview-view-frame (car my-overview-views)) 'tab-bar-lines)))
           (let* ((view (car my-overview-views))
                  (frame (my-overview-view-frame view))
                  (height (frame-pixel-height frame))

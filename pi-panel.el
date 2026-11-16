@@ -9,6 +9,31 @@
 (defvar-local my-pi-width 0.33)
 (defvar-local my-pi-return-window nil)
 
+(defface my-pi-notification
+  '((t (:foreground "#555750")))
+  "Quiet text for Pi extension info and warning notifications."
+  :group 'agent-shell)
+
+(defun my-pi-style-notification (notification)
+  "Style Pi info and warning NOTIFICATION text before streamed rendering."
+  (let ((update (map-nested-elt notification '(params update))))
+    (when (and (equal (map-elt update 'sessionUpdate) "agent_message_chunk")
+               (member (map-nested-elt update '(_meta piAcp notify level))
+                       '("info" "warning"))
+               (equal (map-nested-elt update '(content type)) "text")
+               (stringp (map-nested-elt update '(content text))))
+      (setq notification (copy-tree notification))
+      (let ((content (map-nested-elt notification '(params update content))))
+        ;; Text properties survive the renderer's asynchronous chunk batching.
+        (setf (alist-get 'text content)
+              (propertize (map-elt content 'text)
+                          'face 'my-pi-notification
+                          'font-lock-face 'my-pi-notification
+                          'rear-nonsticky '(face font-lock-face))))))
+  notification)
+
+(advice-add 'agent-shell-pi--notification-adapter :filter-return #'my-pi-style-notification)
+
 (setq agent-shell-pi-acp-command
       (list (expand-file-name "tools/pi-acp/node_modules/.bin/pi-acp"
                               (file-name-directory load-file-name)))
@@ -175,6 +200,7 @@
       (pcase kind
         ('init-finished
          (my-pi-history-select my-pi-root id)
+         (my-pi-record-context id my-pi-root)
          (my-pi-history-update id :owner_instance my-pi-history-instance)
          (my-pi-refresh-and-jump))
         ('session-title-changed
@@ -246,6 +272,9 @@
          (source (if (window-parameter nil 'my-pi-panel) my-pi-return-window (selected-window))) (agent-shell-cwd-function (lambda () root))
          (agent-shell-session-strategy 'new))
     (when (file-remote-p root) (user-error "Pi supports local projects"))
+    (when-let* ((copy (my-pi-copy root)))
+      (unless (my-wt-usable-p copy)
+        (user-error "Working copy %s is unavailable; no agent was started" root)))
     (unless (file-executable-p (car agent-shell-pi-acp-command)) (user-error "Run make pi-acp first"))
     (let ((buffer (agent-shell-start :config (agent-shell-pi-make-agent-config) :session-id id)))
       (with-current-buffer buffer
@@ -256,16 +285,152 @@
 (defun my-pi-new-chat (root)
   (interactive (list (or my-pi-root (alist-get 'my-project-root (tab-bar--current-tab)) default-directory)))
   (my-pi-start-chat root))
-(defun my-pi-open-chat (root id &optional message-id)
+(defun my-pi-copy (root)
+  "The registered working copy at ROOT, if working copies are loaded."
+  (and (fboundp 'my-wt-copy-at) (my-wt-copy-at root)))
+
+(defun my-pi-record-context (id root)
+  "Record the branch and commit a brand-new chat starts on.
+Resumed chats keep their original metadata; a detached HEAD is stored as
+an empty branch with its commit."
+  (let ((chat (my-pi-history-get id)))
+    (when-let* (((not (plist-get chat :branch)))
+                ((not (plist-get chat :first_prompt_at)))
+                (copy (my-pi-copy root))
+                (now (my-wt-context-now copy)))
+      (my-pi-history-update id :branch (or (plist-get now :branch) "") :revision (plist-get now :revision)))))
+
+(defun my-pi-show-offline (chat reason)
+  "Show CHAT's indexed transcript read-only; no agent starts and no directory is created."
+  (let ((buffer (get-buffer-create (format "*Pi transcript: %s*" (plist-get chat :title)))))
+    (with-current-buffer buffer
+      (special-mode)
+      (setq-local default-directory user-emacs-directory my-pi-root nil tab-line-format nil
+                  header-line-format (concat " Offline transcript · " reason))
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (propertize (or (plist-get chat :title) "Chat") 'face 'bold) "\n"
+                (propertize (format "%s\nWorking copy: %s%s" reason (plist-get chat :project_root)
+                                    (if (member (plist-get chat :branch) '(nil "")) ""
+                                      (format " · branch %s" (plist-get chat :branch))))
+                            'face 'shadow) "\n\n")
+        (dolist (row (sqlite-select (my-pi-history-open)
+                      "SELECT role,body FROM messages WHERE session_id=? AND message_id<>'' ORDER BY CAST(ordinal AS INTEGER)"
+                      (list (plist-get chat :id))))
+          (insert (propertize (if (equal (car row) "user") "You" "Pi") 'face 'bold) "\n" (cadr row) "\n\n"))
+        (goto-char (point-min))))
+    (select-window
+     (display-buffer-in-side-window
+      buffer `((side . right) (slot . 0) (window-width . ,my-pi-width)
+               (window-parameters . ((my-pi-panel . t) (no-other-window . t) (no-delete-other-windows . t))))))
+    buffer))
+
+(defvar my-pi-accepted-contexts (make-hash-table :test #'equal)
+  "Session ID -> working-copy context the user accepted for continuing it.
+The chat's own branch/revision metadata is never rewritten.")
+
+(defun my-pi-chat-context (chat)
+  "CHAT's recorded context, or nil if none was recorded.
+A revision that is not a commit ID (older versions stored branch names)
+is unknown rather than guessed."
+  (when-let* ((branch (plist-get chat :branch)))
+    (list :branch (unless (string-empty-p branch) branch)
+          :revision (and (my-wt-commit-id-p (plist-get chat :revision)) (plist-get chat :revision)))))
+
+(defun my-pi-same-context-p (then now)
+  "Non-nil when NOW continues THEN: the same branch, or the same detached commit.
+Commits on the same branch do not count as a change; unknown NOW never matches."
+  (and now (if (plist-get then :branch)
+               (equal (plist-get then :branch) (plist-get now :branch))
+             (and (null (plist-get now :branch)) (plist-get then :revision)
+                  (equal (plist-get then :revision) (plist-get now :revision))))))
+
+(defun my-pi-describe-context (context)
+  (cond ((null context) "an unknown branch")
+        ((plist-get context :branch) (format "branch %s" (plist-get context :branch)))
+        ((plist-get context :revision) (format "detached HEAD %.10s" (plist-get context :revision)))
+        (t "a detached HEAD at an unknown commit")))
+
+(defun my-pi-context-confirmed-p (chat copy)
+  "Non-nil when CHAT may continue in COPY's current context, asking once if it changed."
+  (let* ((id (plist-get chat :id))
+         (then (or (gethash id my-pi-accepted-contexts) (my-pi-chat-context chat)))
+         (now (and copy (my-wt-context-now copy))))
+    (cond ((not copy) t)                  ; not a registered copy: nothing to compare
+          ((not then) (puthash id now my-pi-accepted-contexts) t) ; no recorded context
+          ((my-pi-same-context-p then now) t)
+          ((yes-or-no-p (format "This chat was on %s, but its working copy is now on %s. Continue the conversation there? "
+                                (my-pi-describe-context then) (my-pi-describe-context now)))
+           (puthash id now my-pi-accepted-contexts) t))))
+
+(defun my-pi-submission-refusal ()
+  "Why the current Pi buffer must not send a prompt now, or nil.
+May ask the user to accept a changed branch."
+  (when-let* (((derived-mode-p 'agent-shell-mode))
+              (root my-pi-root)
+              (copy (my-pi-copy root)))
+    (if (not (my-wt-usable-p copy))
+        (format "Prompt not sent: working copy %s is unavailable" root)
+      (when-let* ((id (agent-shell-session-id)) (chat (my-pi-history-get id)))
+        (unless (my-pi-context-confirmed-p chat copy)
+          "Prompt not sent: the conversation was not continued on the changed branch")))))
+
+(defvar my-pi-submitted nil "Set once a guarded submission has gone through.")
+
+(defun my-pi-guard-submit (submit &rest args)
+  "Check the working copy before SUBMIT hands a prompt to a Pi agent.
+Runs before the input is committed, so refusing leaves it editable."
+  (when-let* ((refusal (my-pi-submission-refusal)))
+    (user-error "%s" refusal))
+  (prog1 (apply submit args)
+    (setq my-pi-submitted t)))
+
+(defun my-pi-guard-queue (process &rest args)
+  "Check before PROCESS drops queued prompts and sets the draft aside.
+If the submission still fails without sending anything, the queue and the
+draft (with its text properties) are put back exactly as they were."
+  (if (not (and (derived-mode-p 'agent-shell-mode) my-pi-root
+                (map-elt agent-shell--state :pending-prompts)))
+      (apply process args)
+    (if-let* ((refusal (my-pi-submission-refusal)))
+        (message "%s; queued prompts and your draft were kept" refusal)
+      (let* ((pending (map-elt agent-shell--state :pending-prompts))
+             (start (agent-shell--prompt-input-start))
+             (draft (and start (buffer-substring start (point-max))))
+             (my-pi-submitted nil))
+        (condition-case err
+            (apply process args)
+          (error
+           (if my-pi-submitted (signal (car err) (cdr err)) ; sent: never resend
+             (map-put! agent-shell--state :pending-prompts pending)
+             (when-let* ((start (agent-shell--prompt-input-start)))
+               (delete-region start (point-max)))
+             (when draft (goto-char (point-max)) (insert draft))
+             (message "%s; queued prompts and your draft were kept" (error-message-string err)))))))))
+
+(cl-defun my-pi-open-chat (root id &optional message-id)
   (let ((chat (my-pi-history-get id)) (buffer (gethash id my-pi-sessions)))
-    (unless (and chat (equal (my-pi-history-root root) (plist-get chat :project_root)))
+    (unless (and chat (my-pi-history-same-project-p root (plist-get chat :project_root)))
       (user-error "Chat does not belong to this project"))
+    ;; Never run a chat outside its own usable copy, even when that copy is
+    ;; the one already selected: an unmounted Arc root is just an empty folder.
+    (let ((copy (my-pi-copy (plist-get chat :project_root)))
+          (foreign (not (equal (my-pi-history-root root) (plist-get chat :project_root)))))
+      (when (if copy (not (my-wt-usable-p copy)) foreign)
+        (cl-return-from my-pi-open-chat
+          (my-pi-show-offline chat "Its working copy is deleted or unavailable; no agent was started")))
+      (when foreign
+        (my-wt-switch copy)
+        (setq root (plist-get chat :project_root))))
+    ;; A live agent is checked again before each prompt (`my-pi-guard-submit').
     (if (my-pi-live-p buffer)
         (progn (select-window (my-pi-display-buffer buffer nil))
                (my-pi-history-select root id)
                (when (and message-id (not (string-empty-p message-id))) (my-pi-goto-message message-id))
                buffer)
-      (my-pi-start-chat root id (unless (equal message-id "") message-id)))))
+      (if (my-pi-context-confirmed-p chat (my-pi-copy root))
+          (my-pi-start-chat root id (unless (equal message-id "") message-id))
+        (my-pi-show-offline chat "Not continued: the working copy is on a different branch")))))
 
 (defun my-pi-record-rendered (key role text pos append)
   (when (and my-pi-root my-pi-rendered text pos)
@@ -324,7 +489,7 @@
                        (and (derived-mode-p 'agent-shell-mode) (agent-shell-session-id)))))
         (unless (and current (my-pi-history-get current))
           (select-window window)
-          (if-let* ((chat (car (my-pi-history-list root))))
+          (if-let* ((chat (cl-find root (my-pi-history-list root) :key (lambda (c) (plist-get c :project_root)) :test #'equal)))
               (my-pi-open-chat root (plist-get chat :id))
             (let ((buffer (get-buffer-create (format " *Pi empty: %s*" root))))
               (with-current-buffer buffer
@@ -340,6 +505,11 @@
               (set-window-buffer window buffer))))))))
 
 (advice-add 'agent-shell-ui-update-fragment :around #'my-pi-record-fragment)
+;; Both routes run before the input is committed or queued.
+(advice-add 'shell-maker-submit :around #'my-pi-guard-submit)
+(advice-add 'agent-shell--busy-submit :around #'my-pi-guard-submit)
+;; Queued prompts leave the queue before they are submitted, so check first.
+(advice-add 'agent-shell--prompt-queue-process-next :around #'my-pi-guard-queue)
 (advice-add 'agent-shell-ui-update-text :around #'my-pi-record-text)
 (advice-add 'agent-shell--update-header-and-mode-line :after #'my-pi-keep-header)
 (add-hook 'agent-shell-mode-hook #'my-pi-attach)

@@ -132,6 +132,7 @@ Each mark is (FIRST-LINE LAST-LINE TYPE POSITION)."
                   (no-other-frame . t) (desktop-dont-save . t)
                   (skip-taskbar . t) (unsplittable . t)
                   (menu-bar-lines . 0) (tool-bar-lines . 0) (tab-bar-lines . 0)
+                  (tab-bar-lines-keep-state . t)
                   (internal-border-width . 0) (border-width . 0)
                   (left-fringe . 0) (right-fringe . 0)
                   (vertical-scroll-bars . nil) (horizontal-scroll-bars . nil)

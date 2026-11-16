@@ -9,7 +9,15 @@
 (defconst my-pi-history-directory (file-name-directory load-file-name))
 (defconst my-pi-history-columns
   '(session_id project_root session_file title created_at first_prompt_at last_reply_at
-    last_reply_id read_reply_id turn_state owner_instance deleting fingerprint pending_since))
+    last_reply_id read_reply_id turn_state owner_instance deleting fingerprint pending_since
+    branch revision))
+;; Rows are decoded positionally, so never rely on `SELECT *' column order.
+(defconst my-pi-history-select
+  (concat "SELECT " (mapconcat #'symbol-name my-pi-history-columns ",") " FROM chats"))
+(defconst my-pi-history-group-sql
+  "(project_root=? OR project_root IN (SELECT w.directory FROM working_copies w
+     JOIN working_copies s ON s.project_id=w.project_id WHERE s.directory=?))"
+  "Match every working-copy root of ROOT's logical project; takes ROOT twice.")
 
 (defun my-pi-history-root (root)
   (file-name-as-directory (file-truename root)))
@@ -37,7 +45,7 @@
         (sqlite-execute my-pi-history-db "PRAGMA journal_mode=WAL")
         (sqlite-execute my-pi-history-db "PRAGMA busy_timeout=50")
         (sqlite-execute my-pi-history-db "PRAGMA foreign_keys=ON")
-        (when (> (caar (sqlite-select my-pi-history-db "PRAGMA user_version")) 1)
+        (when (> (caar (sqlite-select my-pi-history-db "PRAGMA user_version")) 2)
           (error "Pi history database was created by a newer configuration"))
         (sqlite-execute my-pi-history-db "CREATE TABLE IF NOT EXISTS chats (
           session_id TEXT PRIMARY KEY, project_root TEXT NOT NULL, session_file TEXT,
@@ -57,11 +65,91 @@
         (sqlite-execute my-pi-history-db "CREATE TABLE IF NOT EXISTS deleted_chats (session_id TEXT PRIMARY KEY)")
         (unless (member "pending_since" (mapcar #'cadr (sqlite-select my-pi-history-db "PRAGMA table_info(chats)")))
           (sqlite-execute my-pi-history-db "ALTER TABLE chats ADD COLUMN pending_since TEXT"))
-        (sqlite-execute my-pi-history-db "PRAGMA user_version=1")
+        (condition-case err (my-pi-history-migrate my-pi-history-db)
+          (error (sqlite-close my-pi-history-db) (setq my-pi-history-db nil)
+                 (signal (car err) (cdr err))))
         my-pi-history-db)))
 
+(defun my-pi-history-id ()
+  (substring (secure-hash 'sha256 (format "%s-%s-%s-%s" (random) (float-time) (emacs-pid) (system-name))) 0 12))
+
+(defun my-pi-history-backup (db)
+  "Snapshot DB through SQLite itself, which is consistent while WAL is active."
+  (let ((backup (expand-file-name (format "pi/backups/chats-v%s-%s-%s-%s.sqlite"
+                                          (caar (sqlite-select db "PRAGMA user_version"))
+                                          (format-time-string "%Y%m%dT%H%M%S") (emacs-pid) (my-pi-history-id))
+                                  user-emacs-directory)))
+    (make-directory (file-name-directory backup) t)
+    (sqlite-execute db "VACUUM INTO ?" (list backup))
+    backup))
+
+(defun my-pi-history--ensure-copy (db root)
+  "Register ROOT as the original copy of a new project unless already known."
+  (unless (sqlite-select db "SELECT 1 FROM working_copies WHERE directory=?" (list root))
+    (let ((project (my-pi-history-id)) (now (my-pi-history-now)))
+      (sqlite-execute db "INSERT INTO logical_projects(project_id,name,created_at) VALUES (?,?,?)"
+                      (list project (file-name-nondirectory (directory-file-name root)) now))
+      (sqlite-execute db "INSERT INTO working_copies(copy_id,project_id,role,directory,created_at)
+                          VALUES (?,?,'original',?,?)" (list (my-pi-history-id) project root now))
+      (sqlite-execute db "UPDATE logical_projects SET active_copy_id=(SELECT copy_id FROM working_copies
+                          WHERE project_id=? AND role='original') WHERE project_id=?" (list project project)))))
+
+(defun my-pi-history-migrate (db)
+  "Add logical projects and working copies additively, once, in one transaction."
+  (when (or (< (caar (sqlite-select db "PRAGMA user_version")) 2)
+            (not (member "last_opened_at" (mapcar #'cadr (sqlite-select db "PRAGMA table_info(working_copies)")))))
+    ;; A new, empty catalogue has nothing worth backing up.
+    (unless (zerop (caar (sqlite-select db "SELECT COUNT(*) FROM chats")))
+      (my-pi-history-backup db))
+    (let ((attempt 0) done)
+      (while (not done)
+        (condition-case err
+            (progn
+              (my-pi-history-transaction db
+                ;; Another process may have migrated while this one waited for the lock.
+                (when (< (caar (sqlite-select db "PRAGMA user_version")) 2)
+                  (sqlite-execute db "CREATE TABLE logical_projects (
+                    project_id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at TEXT NOT NULL,
+                    active_copy_id TEXT, picker_width INTEGER, picker_height INTEGER,
+                    picker_left INTEGER, picker_top INTEGER)")
+                  (sqlite-execute db "CREATE TABLE working_copies (
+                    copy_id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL REFERENCES logical_projects(project_id),
+                    role TEXT NOT NULL CHECK (role IN ('original','copy')),
+                    directory TEXT NOT NULL UNIQUE, vcs_root TEXT, relative_path TEXT, vcs TEXT,
+                    arc_repository TEXT, arc_store TEXT, arc_object_store TEXT,
+                    owned INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL DEFAULT 'ready',
+                    tree_name TEXT, branch TEXT, start_revision TEXT, error TEXT,
+                    created_at TEXT NOT NULL, updated_at TEXT)")
+                  (sqlite-execute db "CREATE UNIQUE INDEX working_copies_original
+                    ON working_copies(project_id) WHERE role='original'")
+                  (sqlite-execute db "ALTER TABLE chats ADD COLUMN branch TEXT")
+                  (sqlite-execute db "ALTER TABLE chats ADD COLUMN revision TEXT")
+                  (dolist (row (sqlite-select db "SELECT project_root FROM chats UNION SELECT project_root FROM projects"))
+                    (my-pi-history--ensure-copy db (car row)))
+                  (sqlite-execute db "PRAGMA user_version=2"))
+                (unless (member "last_opened_at" (mapcar #'cadr (sqlite-select db "PRAGMA table_info(working_copies)")))
+                  (sqlite-execute db "ALTER TABLE working_copies ADD COLUMN last_opened_at TEXT")))
+              (setq done t))
+          (sqlite-error
+           (unless (and (< (cl-incf attempt) 100) (string-match-p "locked\\|busy" (error-message-string err)))
+             (signal (car err) (cdr err)))
+           (sleep-for 0.05)))))))
+
+(defun my-pi-history-project-roots (root)
+  "All recorded working-copy roots of ROOT's project, including deleted copies."
+  (or (mapcar #'car (sqlite-select (my-pi-history-open)
+                     "SELECT w.directory FROM working_copies w JOIN working_copies s
+                      ON s.project_id=w.project_id WHERE s.directory=? ORDER BY w.role DESC, w.created_at"
+                     (list (my-pi-history-root root))))
+      (list (my-pi-history-root root))))
+(defun my-pi-history-same-project-p (root other)
+  (and other (member (my-pi-history-root other) (my-pi-history-project-roots root)) t))
+
 ;; Reloading the configuration can reuse a connection opened by the previous version.
-(when my-pi-history-db (my-pi-history-ensure-geometry my-pi-history-db))
+(when my-pi-history-db
+  (my-pi-history-ensure-geometry my-pi-history-db)
+  (my-pi-history-migrate my-pi-history-db))
 
 (defun my-pi-history--row (row)
   (let (result)
@@ -73,7 +161,7 @@
                (and (plist-get result :last_reply_id)
                     (not (equal (plist-get result :last_reply_id) (plist-get result :read_reply_id)))))))
 (defun my-pi-history-get (id)
-  (when-let* ((row (car (sqlite-select (my-pi-history-open) "SELECT * FROM chats WHERE session_id=?" (list id)))))
+  (when-let* ((row (car (sqlite-select (my-pi-history-open) (concat my-pi-history-select " WHERE session_id=?") (list id)))))
     (my-pi-history--row row)))
 (defun my-pi-history--register (id root &optional file)
   (let ((db (my-pi-history-open)) (root (my-pi-history-root root)))
@@ -139,11 +227,11 @@
 (defun my-pi-history-list (root)
   (mapcar #'my-pi-history--row
           (sqlite-select (my-pi-history-open)
-           "SELECT * FROM chats WHERE project_root=? ORDER BY
+           (concat my-pi-history-select " WHERE " my-pi-history-group-sql " ORDER BY
             CASE WHEN last_reply_id IS NOT NULL AND last_reply_id IS NOT read_reply_id THEN 0
                  WHEN turn_state IN ('running','needs-input') THEN 1 ELSE 2 END,
-            COALESCE(last_reply_at,first_prompt_at,created_at) DESC, session_id"
-           (list (my-pi-history-root root)))))
+            COALESCE(last_reply_at,first_prompt_at,created_at) DESC, session_id")
+           (let ((root (my-pi-history-root root))) (list root root)))))
 (defun my-pi-history-select (root id)
   (sqlite-execute (my-pi-history-open)
    "INSERT INTO projects(project_root,selected_session_id) VALUES (?,?)
@@ -169,13 +257,13 @@
   (let ((fts (my-pi-history-fts-query query)) (db (my-pi-history-open)) result)
     (unless (string-empty-p fts)
       (dolist (row (sqlite-select db
-        "WITH hits AS MATERIALIZED (
+        (concat "WITH hits AS MATERIALIZED (
           SELECT c.session_id, m.message_id='' AS is_title, bm25(messages) AS score, c.last_reply_at
           FROM messages m JOIN chats c ON c.session_id=m.session_id
-          WHERE messages MATCH ? AND c.project_root=? AND c.deleting=0)
+          WHERE messages MATCH ? AND c.deleting=0 AND " my-pi-history-group-sql ")
          SELECT session_id, MAX(is_title) AS title_hit, COUNT(*)
-         FROM hits GROUP BY session_id ORDER BY title_hit DESC, MIN(score), last_reply_at DESC LIMIT 50 OFFSET ?"
-        (list fts (my-pi-history-root root) (or offset 0))))
+         FROM hits GROUP BY session_id ORDER BY title_hit DESC, MIN(score), last_reply_at DESC LIMIT 50 OFFSET ?")
+        (list fts (my-pi-history-root root) (my-pi-history-root root) (or offset 0))))
         (let ((chat (my-pi-history-get (car row))))
           (setq chat (plist-put chat :count (nth 2 row)))
           (setq chat (plist-put chat :matches
@@ -278,7 +366,7 @@
 (defun my-pi-history-delete-finish (root id)
   "Remove metadata only after the session file is confirmed absent."
   (let ((chat (my-pi-history-get id)) (db (my-pi-history-open)))
-    (unless (and chat (equal (my-pi-history-root root) (plist-get chat :project_root)))
+    (unless (and chat (my-pi-history-same-project-p root (plist-get chat :project_root)))
       (error "Chat belongs to another project"))
     (when (and (plist-get chat :session_file) (my-pi-history-file-present-p (plist-get chat :session_file)))
       (error "Pi did not delete the session file; history retained"))
@@ -316,7 +404,7 @@
   (let ((root (my-pi-history-root root)))
     ;; Validate the whole snapshot before any destructive action.
     (dolist (id ids)
-      (unless (equal root (plist-get (my-pi-history-get id) :project_root))
+      (unless (my-pi-history-same-project-p root (plist-get (my-pi-history-get id) :project_root))
         (user-error "Chat belongs to another project")))
     (my-pi-history-write-retry
      (lambda ()
@@ -391,13 +479,13 @@
   "Reconcile recorded work with saved completions, even for a cached index."
   (let ((db (my-pi-history-open)) (root (my-pi-history-root root)))
     (sqlite-execute db
-     "UPDATE chats SET turn_state='interrupted' WHERE project_root=?
-      AND turn_state IN ('running','needs-input') AND owner_instance IS NOT ?"
-     (list root my-pi-history-instance))
+     (concat "UPDATE chats SET turn_state='interrupted' WHERE " my-pi-history-group-sql "
+      AND turn_state IN ('running','needs-input') AND owner_instance IS NOT ?")
+     (list root root my-pi-history-instance))
     (sqlite-execute db
-     "UPDATE chats SET turn_state='idle',pending_since=NULL WHERE project_root=?
-      AND turn_state='interrupted' AND julianday(last_reply_at)>=julianday(pending_since)"
-     (list root))))
+     (concat "UPDATE chats SET turn_state='idle',pending_since=NULL WHERE " my-pi-history-group-sql "
+      AND turn_state='interrupted' AND julianday(last_reply_at)>=julianday(pending_since)")
+     (list root root))))
 
 (defun my-pi-history-file-present-p (file)
   "Prove absence by listing an accessible parent; never confuse EACCES with ENOENT."
@@ -409,16 +497,19 @@
 (defun my-pi-history-resume-deletions (root)
   "Resume only deletion intents confirmed in a previous Emacs instance."
   (let ((ids (mapcar #'car (sqlite-select (my-pi-history-open)
-               "SELECT session_id FROM chats WHERE project_root=? AND deleting=1 AND owner_instance IS NOT ?"
-               (list (my-pi-history-root root) my-pi-history-instance)))))
+               (concat "SELECT session_id FROM chats WHERE " my-pi-history-group-sql
+                       " AND deleting=1 AND owner_instance IS NOT ?")
+               (list (my-pi-history-root root) (my-pi-history-root root) my-pi-history-instance)))))
     (when ids (my-pi-history-delete root ids))))
 
 (defun my-pi-history-validate-delete (root id)
   "Reject stale/mismatched paths before asking the adapter to unlink anything."
   (let* ((chat (my-pi-history-get id)) (file (plist-get chat :session_file))
          (entry (cl-find id (my-pi-history-mappings) :key (lambda (e) (alist-get 'sessionId e)) :test #'equal)))
-    (unless (equal (my-pi-history-root root) (plist-get chat :project_root))
+    (unless (my-pi-history-same-project-p root (plist-get chat :project_root))
       (error "Chat belongs to another project"))
+    ;; File and binding checks use the chat's own working copy, not the viewer's.
+    (setq root (plist-get chat :project_root))
     (when entry
       (unless (my-pi-history-binding-matches-p entry id root file)
         (error "Pi session mapping changed; refresh history before deleting")))

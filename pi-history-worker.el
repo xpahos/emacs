@@ -60,7 +60,7 @@
          (header (my-pi-history-file-header file))
          (id (if binding (alist-get 'sessionId binding) (alist-get 'id header)))
          (db (my-pi-history-open)) (old (my-pi-history-get id))
-         (aliases (sqlite-select db "SELECT * FROM chats WHERE session_file=? AND session_id<>?" (list file id)))
+         (aliases (sqlite-select db (concat my-pi-history-select " WHERE session_file=? AND session_id<>?") (list file id)))
          (repair (or aliases (and old binding (not (plist-get old :fingerprint))
                                   (or (not (equal id (alist-get 'id header)))
                                       (not (equal root (my-pi-history-root (alist-get 'cwd header))))))))
@@ -123,8 +123,9 @@
       id)))
 
 (defun my-pi-history-discover (root profile)
-  "Use the latest ACP binding per file; fall back to headers for unmapped files."
-  (let ((root (my-pi-history-root root)) (files (make-hash-table :test #'equal)) warnings)
+  "Use the latest ACP binding per file; fall back to headers for unmapped files.
+Every working copy of ROOT's project is discovered, each under its own root."
+  (let ((roots (my-pi-history-project-roots root)) (files (make-hash-table :test #'equal)) warnings)
     (condition-case err
         (dolist (entry (my-pi-history-mappings profile))
           (let* ((file (file-truename (alist-get 'sessionFile entry))) (previous (gethash file files)))
@@ -139,14 +140,15 @@
             (condition-case err
                 (let ((header (my-pi-history-file-header file)))
                   (when (and (equal (alist-get 'type header) "session") (stringp (alist-get 'cwd header))
-                             (equal root (my-pi-history-root (alist-get 'cwd header))))
-                    (puthash file t files)))
+                             (member (my-pi-history-root (alist-get 'cwd header)) roots))
+                    (puthash file (my-pi-history-root (alist-get 'cwd header)) files)))
               (error (push (format "%s: %s" (file-name-nondirectory file) (error-message-string err)) warnings)))))))
     (maphash
      (lambda (file binding)
        (condition-case err
-           (let ((mapped (listp binding)))
-             (when (and (or (not mapped) (equal root (my-pi-history-root (alist-get 'cwd binding))))
+           (let* ((mapped (listp binding))
+                  (root (if mapped (my-pi-history-root (alist-get 'cwd binding)) binding)))
+             (when (and (member root roots)
                         (not (and mapped (sqlite-select (my-pi-history-open)
                                            "SELECT 1 FROM deleted_chats WHERE session_id=?"
                                            (list (alist-get 'sessionId binding))))))

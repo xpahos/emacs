@@ -16,6 +16,10 @@
   '((t (:foreground "#642d3b")))
   "Dark burgundy dates in the chat picker."
   :group 'faces)
+(defface my-pi-history-branch
+  '((t (:foreground "#173568")))
+  "Blue working-copy branch labels in the chat picker."
+  :group 'faces)
 (defvar-local my-pi-picker-generation 0)
 (defvar-local my-pi-picker-results nil)
 (defvar-local my-pi-picker-offset 0)
@@ -107,6 +111,17 @@
       (pcase state ("running" "Running") ("needs-input" "Needs input") ("error" "Error")
              ("interrupted" "Interrupted") (_ nil))
       (when (= (or (plist-get chat :deleting) 0) 1) "Delete failed — retry"))) " · ")))
+(defun my-pi-picker-copy-label (chat)
+  "Name CHAT's working copy and distinguish its role, including the current copy."
+  (if-let* (((fboundp 'my-wt-copy-at))
+            (copy (my-wt-copy-at (plist-get chat :project_root))))
+      (let ((original (equal (plist-get copy :role) "original")))
+        (propertize (format "  [%s %s%s]" (if original "⌂" "⧉") (my-wt-label copy)
+                            (if (equal (plist-get copy :state) "deleted") ", deleted" ""))
+                    'face 'my-pi-history-branch
+                    'help-echo (format "%s\n%s" (if original "Original" "Working copy")
+                                       (plist-get copy :directory))))
+    ""))
 (defun my-pi-picker-open (id &optional message-id)
   (let ((root my-pi-picker-root))
     (my-pi-history-close)
@@ -148,12 +163,15 @@
           (insert (propertize (concat "  " group "\n") 'face 'bold))
           (insert (propertize "\n" 'line-height 0.6)))
         (insert "  ")
-        (insert-text-button (or (plist-get chat :title) "New chat")
+        (insert-text-button (string-join
+                             (split-string (or (plist-get chat :title) "New chat") "[[:space:]]+" t)
+                             " ")
           'follow-link t 'face 'default 'action (lambda (_) (my-pi-picker-open id (plist-get match :message-id))))
         (insert "  ")
         (insert-text-button "×" 'follow-link t 'help-echo "Delete chat" 'face 'shadow
           'action (lambda (_) (my-pi-history-confirm-delete my-pi-picker-root (list id))))
         (insert "\n    " (propertize (my-pi-picker-status chat) 'face (if (plist-get chat :unread) 'success 'shadow))
+                (my-pi-picker-copy-label chat)
                 "  " (propertize (or (plist-get chat :last_reply_at) (plist-get chat :created_at) "")
                                   'face 'my-pi-history-date) "\n")
         (when match

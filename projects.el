@@ -109,20 +109,25 @@
                 (switch-to-buffer (find-file-noselect file))))))))))
 
 (defun my-project-open (directory)
-  "Open DIRECTORY in its own workspace, or return to its existing tab."
+  "Open DIRECTORY in its project's tab, switching to it as the working copy."
   (interactive "DOpen folder: ")
   (unless (file-directory-p directory)
     (user-error "Folder does not exist: %s" directory))
   (let* ((root (file-name-as-directory (file-truename directory)))
+         (copy (my-wt-register root))
+         (project (plist-get copy :project_id))
          (tabs (tab-bar-tabs))
-         (existing (seq-position tabs root
-                                 (lambda (tab path)
-                                   (equal (alist-get 'my-project-root tab) path)))))
+         ;; One visible tab per logical project, whichever copy it shows.
+         (existing (seq-position tabs project
+                                 (lambda (tab id)
+                                   (equal (plist-get (my-wt-tab-copy tab) :project_id) id)))))
     (project-remember-project (cons 'transient root))
+    (my-wt-reconcile project)
     (if existing
-        (tab-bar-select-tab (1+ existing))
+        (progn (tab-bar-select-tab (1+ existing))
+               (my-wt-switch copy))
       (let* ((default-directory root)
-             (base (file-name-nondirectory (directory-file-name root)))
+             (base (plist-get (my-wt-project project) :name))
              (name base)
              (suffix 1))
         (while (seq-some (lambda (tab) (equal name (alist-get 'name tab))) tabs)
@@ -137,7 +142,9 @@
         (let ((editor (selected-window)))
           (treemacs-add-and-display-current-project-exclusively)
           (select-window editor))
-        (my-project-restore-files root)))))
+        (my-project-restore-files root)
+        (my-wt-set-active copy)
+        (my-wt-refresh-branch copy)))))
 
 (defun my-project-switch ()
   "Select a recent project, or choose a new folder."
@@ -168,21 +175,41 @@
        (equal (alist-get 'name tab) "Start")))
 
 (defun my-project-before-close (tab _last)
-  "Close TAB's unshared files, preserving the tab if a close is canceled."
-  (when (alist-get 'my-project-root tab)
-    (let* ((buffers (my-project-tab-buffers tab))
-           (state-file (my-project-files-state-file (alist-get 'my-project-root tab)))
+  "Close TAB's unshared files, preserving the tab if a close is canceled.
+Each working copy's file list is saved under its own root."
+  (when-let* ((root (alist-get 'my-project-root tab)))
+    (let* ((own (my-project-tab-buffers tab))
+           (copies (ignore-errors (my-wt-copies (plist-get (my-wt-tab-copy tab) :project_id))))
+           ;; Inactive copies of this project keep their buffers in saved states.
+           (inactive (delq nil (mapcar (lambda (copy)
+                                         (let ((dir (plist-get copy :directory)))
+                                           (unless (equal dir root)
+                                             (when-let* ((state (gethash dir my-wt-states)))
+                                               (cons dir (append (nth 1 state) (nth 2 state)))))))
+                                       copies)))
            (others (delq tab (copy-sequence (tab-bar-tabs))))
-           (shared (mapcan #'my-project-tab-buffers others)))
-      ;; Capture the list before killing buffers, including hidden/shared files.
-      (make-directory (file-name-directory state-file) t)
-      (with-temp-file state-file
-        (let ((print-length nil) (print-level nil))
-          (prin1 (delq nil (mapcar #'buffer-file-name buffers)) (current-buffer))))
-      (dolist (buffer buffers)
-        (when (and (buffer-file-name buffer) (not (memq buffer shared)))
-          (unless (kill-buffer buffer)
-            (user-error "Project close canceled")))))))
+           (shared (mapcan #'my-project-tab-buffers others))
+           (doomed (seq-filter (lambda (b) (and (buffer-live-p b) (buffer-file-name b) (not (memq b shared))))
+                               (delete-dups (apply #'append own (mapcar #'cdr inactive))))))
+      ;; Capture the lists before killing buffers, including hidden/shared files.
+      (my-wt-save-files root own)
+      (dolist (entry inactive) (my-wt-save-files (car entry) (cdr entry)))
+      ;; `kill-buffer' from Lisp does not ask about unsaved edits, so ask here,
+      ;; before anything is closed; declining cancels the whole close.
+      (when-let* ((modified (seq-filter #'buffer-modified-p doomed)))
+        (dolist (buffer modified)
+          (unless (with-current-buffer buffer (run-hook-with-args-until-failure 'kill-buffer-query-functions))
+            (user-error "Project close canceled")))
+        (save-some-buffers nil (lambda () (memq (current-buffer) modified)))
+        (dolist (buffer modified)
+          (when (and (buffer-modified-p buffer)
+                     (not (yes-or-no-p (format "Discard unsaved changes in %s? " (buffer-name buffer)))))
+            (user-error "Project close canceled"))))
+      (dolist (buffer doomed)
+        (unless (kill-buffer buffer)
+          (user-error "Project close canceled")))
+      ;; Only a completed close forgets the inactive copies' layouts.
+      (dolist (entry inactive) (remhash (car entry) my-wt-states)))))
 
 (defun my-project-after-select (_previous tab)
   "Refresh recent projects on returning to the start TAB."
@@ -191,6 +218,7 @@
 
 (defun my-project-session-roots (&rest _)
   "Record explicit roots before Tabspaces writes the session."
+  (my-wt-save-inactive)
   (setq tabspaces-project-tab-map
         (delq nil
               (mapcar (lambda (tab)
@@ -203,15 +231,24 @@
   (with-selected-frame (or (frame-parent) (selected-frame))
     (apply save-function args)))
 
+(defun my-project-restored-root (root)
+  "ROOT, or its project's original directory when that copy is gone."
+  (if (or (not root) (file-remote-p root) (file-directory-p root)) root
+    (when-let* ((copy (ignore-errors (my-wt-copy-at root)))
+                (original (my-wt-original (plist-get copy :project_id))))
+      (message "Working copy %s is unavailable; showing %s" root (plist-get original :directory))
+      (plist-get original :directory))))
+
 (defun my-project-session-trees (&rest _)
   "Reconnect restored tabs to their explicit roots and file trees."
   (let ((selected (alist-get 'name (tab-bar--current-tab))))
     (dolist (tab (tab-bar-tabs))
       (let* ((name (alist-get 'name tab))
-             (root (car (rassoc name tabspaces-project-tab-map))))
+             (root (my-project-restored-root (car (rassoc name tabspaces-project-tab-map)))))
         (when (equal name "Start")
           (my-project-home))
         (when (and root (not (file-remote-p root)) (file-directory-p root))
+          (ignore-errors (my-wt-set-active (my-wt-register root) t))
           (tab-bar-select-tab-by-name name)
           (setf (alist-get 'my-project-root (cdr (tab-bar--current-tab-find))) root)
           (project-remember-project (cons 'transient root))
@@ -221,6 +258,11 @@
             (treemacs-add-and-display-current-project-exclusively)
             (when (window-live-p editor) (select-window editor))))))
     (tab-bar-select-tab-by-name selected)))
+
+(defun my-project-skip-missing-file (restore record)
+  "Do not RESTORE a file RECORD that no longer exists; visiting it would create it on save."
+  (unless (and (stringp record) (not (file-remote-p record)) (not (file-exists-p record)))
+    (funcall restore record)))
 
 (defun my-project-restore-session ()
   "Restore the saved workspaces once the graphical frame is ready."
@@ -273,7 +315,7 @@
       inhibit-startup-screen t)
 
 (add-hook 'project-find-functions #'my-project-find)
-(tab-bar-mode 1)
+(unless tab-bar-mode (tab-bar-mode 1))
 (unless tabspaces-mode (tabspaces-mode 1))
 (unless (eq (treemacs-current-scope-type) 'treemacs-tab-bar-scope)
   (treemacs-set-scope-type 'Tabs))
@@ -287,6 +329,10 @@
 (advice-add 'tabspaces-save-session :before #'my-project-session-roots)
 (advice-add 'tabspaces-save-session :around #'my-project-save-parent-session)
 (advice-add 'tabspaces-restore-session :after #'my-project-session-trees)
+(advice-add 'tabspaces--restore-buffer-record :around #'my-project-skip-missing-file)
+;; Unmodified buffers follow external checkouts; modified ones keep the user's
+;; edits and report the conflict through Emacs' supersession check.
+(global-auto-revert-mode 1)
 (unless noninteractive
   (add-hook 'kill-emacs-hook #'tabspaces--save-session-smart)
   (tabspaces--setup-session-auto-save)
@@ -346,4 +392,6 @@ After an external checkout, use \\[eglot-reconnect]."
       (my-project-home))
   (my-project-start-buffer))
 
+(load (expand-file-name "worktrees.el" (file-name-directory (or load-file-name buffer-file-name))) nil t)
+(load (expand-file-name "worktree-ui.el" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (provide 'my-projects)

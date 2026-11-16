@@ -28,3 +28,22 @@ test-line-blame-gui:
 	home=$$(mktemp -d -t emacs-line-blame-gui) && \
 	EMACS_TEST_HOME=$$home $(EMACS) -Q -l $(CURDIR)/tests/gui-line-blame-smoke.el; \
 	status=$$?; cat $$home/result 2>/dev/null; exit $$status
+
+.PHONY: test-worktrees test-worktrees-gui
+test-worktrees:
+	$(EMACS) -Q --batch -l tests/worktrees-tests.el -f ert-run-tests-batch-and-exit
+	$(EMACS) -Q --batch -l tests/worktree-agent-tests.el -f ert-run-tests-batch-and-exit
+
+# Opt-in: mounts and forgets one temporary Arc copy; the source mount is only read.
+.PHONY: test-worktrees-arc
+test-worktrees-arc:
+	EMACS_TEST_REAL_ARC=1 $(EMACS) -Q --batch -l tests/worktrees-arc-tests.el \
+	  --eval '(ert-run-tests-batch-and-exit "real-arc")'
+
+# Two GUI processes share one temporary home: save, then restart and restore.
+test-worktrees-gui:
+	home=$$(mktemp -d -t emacs-worktree-gui) && \
+	for phase in save restore; do \
+	  EMACS_TEST_HOME=$$home EMACS_TEST_PHASE=$$phase $(EMACS) -Q -l $(CURDIR)/tests/gui-worktree-smoke.el \
+	    || { cat $$home/failure.txt; echo; exit 1; }; \
+	done; cat $$home/*.passed

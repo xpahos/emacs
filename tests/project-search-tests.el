@@ -88,6 +88,30 @@
           (should (equal (my-project-read-file root) new)))
       (delete-directory root t))))
 
+(ert-deftest my-project-search-offers-files-before-indexing-finishes ()
+  (let ((root (file-name-as-directory (make-temp-file "file-search-stream-" t))) process)
+    (unwind-protect
+        (cl-letf (((symbol-function 'my-project-search-source)
+                   (lambda (dir)
+                     (list dir "/bin/sh" "-c" "printf 'first.txt\\000'; exec sleep 10")))
+                  ((symbol-function 'completing-read)
+                   (lambda (_prompt table &rest _)
+                     (setq process (get-process "project-files"))
+                     (let ((deadline (+ (float-time) 3)))
+                       (while (and (not (all-completions "first" table)) (< (float-time) deadline))
+                         (accept-process-output process 0.05)))
+                     (should (process-live-p process))
+                     (should (equal (all-completions "first" table) '("first.txt")))
+                     ;; A path split between process chunks is not offered until complete.
+                     (funcall (process-filter process) process "sec")
+                     (should-not (all-completions "sec" table))
+                     (funcall (process-filter process) process "ond.txt\0")
+                     (should (equal (all-completions "sec" table) '("second.txt")))
+                     "first.txt")))
+          (should (equal (my-project-read-file root) (expand-file-name "first.txt" root)))
+          (should-not (process-live-p process)))
+      (delete-directory root t))))
+
 (ert-deftest my-project-search-prunes-git-metadata-only ()
   (let ((root (file-name-as-directory (make-temp-file "file-search-prune-" t))))
     (unwind-protect

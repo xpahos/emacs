@@ -26,3 +26,5 @@ node_modules/
 /treemacs-persist
 /tramp
 /pi/
+# Generated Git worktrees and Arc mounts of working copies.
+/worktree/

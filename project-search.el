@@ -9,8 +9,12 @@
 
 (defun my-project-search-source (root)
   "Return (BASE PROGRAM . ARGS) for listing files below ROOT."
-  (cons root (list find-program "-H" (file-local-name root)
-                   "-type" "d" "-name" ".git" "-prune" "-o" "-type" "f" "-print0")))
+  (let ((copies (directory-file-name (expand-file-name "worktree" user-emacs-directory))))
+    (cons root (append (list find-program "-H" (file-local-name root))
+                       ;; Generated working copies of other projects are not part of this one.
+                       (when (file-in-directory-p copies root)
+                         (list "-path" (file-local-name copies) "-prune" "-o"))
+                       (list "-type" "d" "-name" ".git" "-prune" "-o" "-type" "f" "-print0")))))
 
 (defun my-project-read-file (root)
   "Choose a file under ROOT while a fresh file list is loaded asynchronously."
@@ -24,33 +28,44 @@
          (icomplete-show-matches-on-no-input nil)
          (icomplete-minibuffer-setup-hook '(icomplete--vertical-minibuffer-setup))
          (active t)
-         ready files process output errors minibuffer failure selected)
+         (pending "")
+         ready files process errors minibuffer failure selected refresh refresh-timer dirty)
     (unwind-protect
         (progn
-          (setq output (generate-new-buffer " *project-files*")
-                errors (generate-new-buffer " *project-files-errors*"))
+          (setq errors (generate-new-buffer " *project-files-errors*")
+                refresh
+                (lambda ()
+                  (when (and active dirty (buffer-live-p minibuffer)
+                             (active-minibuffer-window)
+                             (eq (window-buffer (active-minibuffer-window)) minibuffer))
+                    (setq dirty nil)
+                    (with-selected-window (active-minibuffer-window)
+                      (setq completion-all-sorted-completions nil)
+                      (if failure (exit-minibuffer) (icomplete-exhibit)))))
+                refresh-timer (run-at-time 0.1 0.1 refresh))
           (setq process
                 (make-process
-                 :name "project-files" :buffer output :stderr errors
+                 :name "project-files" :buffer nil :stderr errors
                  :command (cdr source) :connection-type 'pipe :noquery t :file-handler t
+                 :filter
+                 (lambda (_proc chunk)
+                   ;; Arc directory walks can be slow; offer complete paths as they arrive.
+                   (setq pending (concat pending chunk))
+                   (when-let* ((end (cl-position 0 pending :from-end t)))
+                     (setq files (nconc (split-string (substring pending 0 end) "\0" t) files)
+                           pending (substring pending (1+ end))
+                           dirty t)))
                  :sentinel
                  (lambda (proc _event)
                    (when (and active (memq (process-status proc) '(exit signal)))
-                     (setq ready t)
-                     (if (zerop (process-exit-status proc))
-                         (setq files
-                               (with-current-buffer output
-                                 (split-string (buffer-string) "\0" t)))
+                     (setq ready t dirty t)
+                     (unless (zerop (process-exit-status proc))
                        (unless failure
                          (setq failure (format "File indexing failed (exit %s): %s"
                                                (process-exit-status proc)
                                                (with-current-buffer errors
                                                  (string-trim (buffer-string)))))))
-                     (when (and (buffer-live-p minibuffer)
-                                (eq (window-buffer (active-minibuffer-window)) minibuffer))
-                       (with-selected-window (active-minibuffer-window)
-                         (setq completion-all-sorted-completions nil)
-                         (if failure (exit-minibuffer) (icomplete-exhibit))))))))
+                     (funcall refresh)))))
           (setq selected
                 (minibuffer-with-setup-hook
                     (lambda ()
@@ -61,7 +76,7 @@
                        (kbd "RET")
                        (lambda ()
                          (interactive)
-                         (if ready
+                         (if (or ready files)
                              (icomplete-force-complete-and-exit)
                            (minibuffer-message "Indexing project files…")))))
                   (completing-read
@@ -76,8 +91,8 @@
             (user-error "Select a file from the results"))
           (expand-file-name selected default-directory))
       (setq active nil)
+      (when (timerp refresh-timer) (cancel-timer refresh-timer))
       (when (process-live-p process) (delete-process process))
-      (when (buffer-live-p output) (kill-buffer output))
       (when (buffer-live-p errors) (kill-buffer errors)))))
 
 (defun my-project-find-file ()
