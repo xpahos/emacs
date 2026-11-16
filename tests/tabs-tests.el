@@ -49,3 +49,21 @@
     (should (equal (get-text-property 0 'display edged) '(space :width (1))))
     (should (equal (get-text-property (1- (length edged)) 'display edged)
                    '(space :width (1))))))
+
+(ert-deftest my-tabs-show-file-path-without-overwriting-close-help ()
+  (save-window-excursion
+    (with-temp-buffer
+      (setq buffer-file-name "/tmp/project/file.el")
+      (let ((tab (current-buffer))
+            (tab-line-close-button-show t))
+        (dolist (selected '(t nil))
+          (set-window-buffer nil (if selected tab (get-buffer-create "*scratch*")))
+          (let* ((label (my-tab-line-label tab (list tab)))
+                 (close (text-property-any 0 (length label)
+                                           'keymap tab-line-tab-close-map label)))
+            (should (equal (get-text-property 2 'help-echo label)
+                           "/tmp/project/file.el"))
+            (should (eq (get-text-property 2 'keymap label) tab-line-tab-map))
+            (should close)
+            (should (equal (get-text-property close 'help-echo label)
+                           "Click to close tab"))))))))

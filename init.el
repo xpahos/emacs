@@ -106,8 +106,13 @@
   (my-tab-side-edges (tab-bar-tab-name-format-default tab index)))
 
 (defun my-tab-line-label (tab tabs)
-  "Format a file TAB among TABS with side edges."
-  (my-tab-side-edges (tab-line-tab-name-format-default tab tabs)))
+  "Format a file TAB among TABS with side edges and its full path as help."
+  (let ((label (tab-line-tab-name-format-default tab tabs)))
+    (when (and (bufferp tab) (buffer-file-name tab))
+      (put-text-property 0 (next-single-property-change
+                            0 'help-echo label (length label))
+                         'help-echo (buffer-file-name tab) label))
+    (my-tab-side-edges label)))
 
 (defun my-tab-line-fill (items)
   "Continue the lower border after tab ITEMS to the window edge."
