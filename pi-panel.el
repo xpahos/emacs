@@ -16,10 +16,31 @@
       agent-shell-session-strategy 'new
       agent-shell-header-style nil)
 
+;; Use the shell's bundle for both Node and Python MCP processes.
+(let ((ca-bundle (getenv "NODE_EXTRA_CA_CERTS"))
+      (names '("SSL_CERT_FILE" "REQUESTS_CA_BUNDLE" "NODE_EXTRA_CA_CERTS")))
+  (setq agent-shell-pi-environment
+        (seq-remove (lambda (entry)
+                      (member (if (consp entry) (car entry)
+                                (car (split-string entry "="))) names))
+                    agent-shell-pi-environment))
+  (when (and ca-bundle (file-readable-p ca-bundle))
+    (dolist (name names)
+      (add-to-list 'agent-shell-pi-environment (concat name "=" ca-bundle)))))
+
+(defun my-pi-mode-line-format ()
+  "Render agent controls with a single Thinking selector for Pi."
+  (if (and (eq (map-nested-elt agent-shell--state '(:agent-config :identifier)) 'pi)
+           (agent-shell-get-thought-level-name agent-shell--state))
+      ;; Pi advertises the same setting as both thought level and legacy mode.
+      (cl-letf (((symbol-function 'agent-shell--get-available-modes) #'ignore))
+        (agent-shell--mode-line-format))
+    (agent-shell--mode-line-format)))
+
 (defun my-pi-setup-mode-line ()
   "Keep the agent's interactive controls in the bottom line."
   (setq-local header-line-format '(:eval (list my-pi-header))
-              mode-line-format '("%e" (:eval (agent-shell--mode-line-format)))))
+              mode-line-format '("%e" (:eval (my-pi-mode-line-format)))))
 
 (add-hook 'agent-shell-mode-hook #'my-pi-setup-mode-line)
 (defun my-pi-data-directory (subdir)
@@ -199,6 +220,10 @@
       (my-pi-history-update id :read_reply_id (plist-get chat :last_reply_id)))))
 
 (defun my-pi-attach ()
+  ;; Reload/restart creates a buffer without going through my-pi-start-chat.
+  (when (and (not my-pi-root)
+             (eq (map-nested-elt (agent-shell--state) '(:agent-config :identifier)) 'pi))
+    (setq my-pi-root (my-pi-history-root (agent-shell-cwd))))
   (when (and my-pi-root (map-elt (agent-shell--state) :client))
     (unless my-pi-rendered (setq my-pi-rendered (make-hash-table :test #'equal)))
     (unless my-pi-subscription
@@ -208,6 +233,9 @@
     (when-let* ((id (agent-shell-session-id)))
       (puthash id (current-buffer) my-pi-sessions)
       (my-pi-history-register id my-pi-root)
+      (when-let* ((status (pcase (agent-shell-status)
+                           ('busy "running") ('blocked "needs-input"))))
+        (my-pi-history-update id :turn_state status :owner_instance my-pi-history-instance))
       (unless (my-pi-history-selected my-pi-root) (my-pi-history-select my-pi-root id))
       (when-let* ((title (map-nested-elt (agent-shell--state) '(:session :title))))
         (my-pi-history-update id :title title)))
