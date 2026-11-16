@@ -1,0 +1,26 @@
+# Build products; keep Lisp/C sources and package assets.
+*.elc
+*.eln
+*.so
+*.dylib
+*.o
+__pycache__/
+*.pyc
+/eln-cache/
+
+# Package download metadata (installed package sources are vendored).
+/elpa/archives/
+/elpa/*.signed
+
+# Editor state, temporary files and macOS metadata.
+*~
+\#*\#
+.#*
+.DS_Store
+/auto-save-list/
+/project-files/
+/tabsession.el
+/recentf.eld
+/projects.eld
+/treemacs-persist
+/tramp

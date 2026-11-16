@@ -1,0 +1,51 @@
+;;; tabs-tests.el --- Tab appearance checks -*- lexical-binding: t; -*-
+(require 'ert)
+(setq user-emacs-directory (make-temp-file "emacs-tab-tests-" t))
+(defconst my-tab-test-init
+  (expand-file-name "../init.el" (file-name-directory load-file-name)))
+(load my-tab-test-init nil t)
+
+(ert-deftest my-tabs-do-not-auto-pad-pixel-wide-edges ()
+  ;; Auto-width copies the first edge's display property onto padding;
+  ;; adjacent spaces then render as one pixel and its loop never finishes.
+  (cl-letf (((symbol-function 'tab-bar-auto-width)
+             (lambda (&rest _) (ert-fail "Pixel edges must not be auto-padded"))))
+    (should (tab-bar-make-keymap-1))))
+
+(ert-deftest my-tabs-have-open-current-border-and-continuous-baseline ()
+  (load my-tab-test-init nil t)
+  (dolist (face '(tab-bar-tab tab-line-tab tab-line-tab-current))
+    (should-not (face-attribute face :box nil t))
+    (should-not (face-attribute face :underline nil t))
+    (should (equal (face-attribute face :overline nil t) "#73726b")))
+  (dolist (face '(tab-bar tab-line tab-bar-tab-inactive
+                 tab-line-tab-inactive tab-line-tab-inactive-alternate))
+    (should (equal (face-attribute face :underline nil t)
+                   '(:color "#73726b" :position t))))
+  (let* ((tab-line-tabs-function (lambda () (list (current-buffer))))
+         (items (tab-line-format-template (list (current-buffer))))
+         (fillers (seq-filter
+                   (lambda (item)
+                     (and (stringp item)
+                          (equal (get-text-property 0 'display item)
+                                 '(space :align-to right))))
+                   items)))
+    (should (= (length fillers) 1))
+    (should (eq (get-text-property 0 'face (car fillers)) 'tab-line)))
+  (should (assq 'align-right (tab-bar-format-list tab-bar-format))))
+
+(ert-deftest my-tabs-preserve-label-and-mouse-actions ()
+  (let* ((tab (window-buffer))
+         (label (tab-line-tab-name-format-default tab (list tab)))
+         (edged (my-tab-line-label tab (list tab))))
+    (should (equal-including-properties (substring edged 2 -2) label))
+    (dolist (position (list 1 (- (length edged) 2)))
+      (should (equal (get-text-property position 'display edged)
+                     '(space :width (10) :height 1.3 :ascent 75)))
+      (should (eq (get-text-property position 'keymap edged) tab-line-tab-map)))
+    (should (eq (get-text-property 0 'tab edged) tab))
+    (should (get-text-property 0 'selected edged))
+    (should (eq (get-text-property 0 'keymap edged) tab-line-tab-map))
+    (should (equal (get-text-property 0 'display edged) '(space :width (1))))
+    (should (equal (get-text-property (1- (length edged)) 'display edged)
+                   '(space :width (1))))))
