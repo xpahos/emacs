@@ -9,7 +9,7 @@
 (defvar-local my-pi-picker-input-start nil)
 (defvar-local my-pi-picker-input-end nil)
 (defface my-pi-search-field
-  '((t (:background "#9e9d96" :box (:line-width 1 :color "#898880"))))
+  '((t (:background "#898880" :box (:line-width 1 :color "#898880"))))
   "Subtle outline around the chat search field."
   :group 'faces)
 (defface my-pi-history-date
@@ -247,10 +247,10 @@
                       (menu-bar-lines . 0) (tool-bar-lines . 0) (vertical-scroll-bars . right)
                       (left . ,(or (nth 2 saved) (+ 4 (nth 0 edges))))
                       (top . ,(or (nth 3 saved) (+ 4 (nth 1 edges))))
-                      (background-color . "#aaa9a2") (foreground-color . "#20211e"))))
+                      (background-color . "#898880") (foreground-color . "#20211e"))))
       (set-window-buffer (frame-root-window my-pi-history-frame) buffer)
       (dolist (face '(header-line mode-line mode-line-inactive))
-        (set-face-attribute face my-pi-history-frame :background "#aaa9a2" :foreground "#20211e" :box nil))
+        (set-face-attribute face my-pi-history-frame :background "#898880" :foreground "#20211e" :box nil))
       (set-face-attribute 'internal-border my-pi-history-frame :background "#85847d")
       (redisplay t)
       (my-pi-picker-set-size my-pi-history-frame width height)

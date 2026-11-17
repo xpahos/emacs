@@ -24,6 +24,10 @@
          (variable "#29313d")
          (variable-use "#29313d")
          (accent-0 "#24534e")
+         (fg-completion-match-0 "#102034")
+         (fg-completion-match-1 "#102034")
+         (fg-completion-match-2 "#102034")
+         (fg-completion-match-3 "#102034")
          (fg-link blue)
          (underline-link blue)
          (fg-link-visited magenta)
@@ -32,9 +36,9 @@
          (bg-hl-line bg-dim))
        (modus-themes-generate-palette
         '((bg-main "#999891")
-          (bg-dim "#92918a")
-          (bg-active "#b1b0a9")
-          (bg-inactive "#96958e")
+          (bg-dim "#898880")
+          (bg-active "#898880")
+          (bg-inactive "#898880")
           (border "#73726b")
           (fg-main "#20211e")
           (fg-dim "#2d3028")
@@ -54,12 +58,12 @@
 (set-face-attribute 'fixed-pitch nil :family "JetBrains Mono NL"
                     :weight 'semi-bold)
 
-;; Keep text readable on the darker selection and heading backgrounds.
-(dolist (face '(region hl-line highlight treemacs-hl-line-face
-                modus-themes-completion-selected))
+;; Cursor-line and text selection keep their distinct background.
+(dolist (face '(region hl-line treemacs-hl-line-face))
   (custom-set-faces
    `(,face ((t (:background "#1c4642" :foreground "#dbe5df"))))))
-(dolist (face '(header-line header-line-active header-line-inactive
+(dolist (face '(highlight modus-themes-completion-selected
+                header-line header-line-active header-line-inactive
                 mode-line mode-line-active mode-line-inactive my-wt-header-frame))
   (custom-set-faces
    `(,face ((t (:background "#898880" :foreground "#20211e"))))))

@@ -511,7 +511,9 @@ Return (:occupied COPY) when an existing registered copy already has the branch.
                    (dolist (server servers) (eglot-shutdown server))))
                eglot--servers-by-project))
     (dolist (buffer (my-wt-copy-buffers copy))
-      (unless (and (buffer-file-name buffer) (buffer-modified-p buffer))
+      ;; Closing an agent can also kill buffers later in this snapshot.
+      (when (and (buffer-live-p buffer)
+                 (not (and (buffer-file-name buffer) (buffer-modified-p buffer))))
         (let ((kill-buffer-query-functions nil)) (quit-windows-on buffer t))))
     (remhash (plist-get copy :directory) my-wt-states)
     (project-forget-project (plist-get copy :directory))))

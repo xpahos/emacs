@@ -486,6 +486,26 @@ Each FUNCTION gets the directory and returns (STATUS STDOUT)."
                  (should (eq (selected-window) editor)))
              (when (buffer-live-p output) (kill-buffer output)))))))))
 
+(ert-deftest my-wt-release-skips-buffers-killed-by-another-buffer-hook ()
+  (my-wt-test
+   (let* ((root (expand-file-name "copy/" tmp))
+          (parent (generate-new-buffer "*wt-release-parent*"))
+          (child (generate-new-buffer "*wt-release-child*"))
+          (remaining (generate-new-buffer "*wt-release-remaining*")))
+     (make-directory root t)
+     (unwind-protect
+         (progn
+           (with-current-buffer parent
+             (add-hook 'kill-buffer-hook (lambda () (kill-buffer child)) nil t))
+           (cl-letf (((symbol-function 'my-wt-copy-buffers)
+                      (lambda (_) (list parent child remaining))))
+             (my-wt-release (list :vcs_root root :directory root)))
+           (should-not (buffer-live-p parent))
+           (should-not (buffer-live-p child))
+           (should-not (buffer-live-p remaining)))
+       (dolist (buffer (list parent child remaining))
+         (when (buffer-live-p buffer) (kill-buffer buffer)))))))
+
 (ert-deftest my-wt-release-stops-only-own-eglot-before-killing-buffers ()
   (my-wt-test
    (require 'eglot)

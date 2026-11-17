@@ -18,7 +18,7 @@
 (defvar-local my-wt-picker-start nil "Source commit captured when branch selection began.")
 
 (defface my-wt-search-field
-  '((t (:background "#9e9d96" :box (:line-width 1 :color "#898880"))))
+  '((t (:background "#898880" :box (:line-width 1 :color "#898880"))))
   "Search field of the working-copy picker, matching the chat picker."
   :group 'faces)
 
@@ -359,10 +359,10 @@
                         (internal-border-width . 5) (drag-internal-border . t) (drag-with-header-line . t)
                         (tab-bar-lines . 0) (tab-bar-lines-keep-state . t)
                         (menu-bar-lines . 0) (tool-bar-lines . 0) (vertical-scroll-bars . right)
-                        (background-color . "#aaa9a2") (foreground-color . "#20211e"))))
+                        (background-color . "#898880") (foreground-color . "#20211e"))))
     (set-window-buffer (frame-root-window my-wt-picker-frame) buffer)
     (dolist (face '(header-line mode-line mode-line-inactive))
-      (set-face-attribute face my-wt-picker-frame :background "#aaa9a2" :foreground "#20211e" :box nil))
+      (set-face-attribute face my-wt-picker-frame :background "#898880" :foreground "#20211e" :box nil))
     (set-face-attribute 'internal-border my-wt-picker-frame :background "#85847d")
     (redisplay t)
     (my-wt-picker-set-size my-wt-picker-frame width height)
