@@ -1,35 +1,69 @@
 ;;; worktrees-arc-tests.el --- Opt-in checks against a real Arc client -*- lexical-binding: t; -*-
 ;; Runs only with EMACS_TEST_REAL_ARC=1.  EMACS_TEST_ARC_SOURCE names a
 ;; directory inside an existing mount (default ~/arc/cloudia/cloud).  The
-;; source mount is only read; the test mounts and forgets one temporary copy.
+;; source files/local branches stay unchanged; fetch may refresh remote-tracking refs.
 (load (expand-file-name "worktrees-tests.el" (file-name-directory load-file-name)) nil t)
 
-(ert-deftest my-wt-real-arc-create-and-forget ()
+(ert-deftest my-wt-real-arc-missing-branch-creates-nothing ()
   (skip-unless (equal (getenv "EMACS_TEST_REAL_ARC") "1"))
   (my-wt-test
    (let* ((arcit-arc-executable (expand-file-name "~/bin/arc"))
           (source-dir (file-name-as-directory (or (getenv "EMACS_TEST_ARC_SOURCE") (expand-file-name "~/arc/cloudia/cloud"))))
           (source (my-wt-register source-dir))
-          (info (my-wt-json (cdr (my-wt-call source-dir arcit-arc-executable "info" "--json"))))
-          (before (cdr (my-wt-call (plist-get source :vcs_root) arcit-arc-executable "info" "--json")))
-          copy)
+          (branches (my-wt-call source-dir arcit-arc-executable "branch" "--list" "--all" "--json"))
+          (copies (my-wt-copies (plist-get source :project_id))))
      (should (equal (plist-get source :vcs) "arc"))
-     (puthash (plist-get source :directory) (list :repository (plist-get info :repository)) my-wt-branches)
-     (unwind-protect
-         (progn
-           ;; The remote head is published, so a fresh store can load it.
-           (setq copy (my-wt-test-create source (list :branch (format "emacs-wt-optin-%s" (my-pi-history-id)) :new t
-                                                     :start (plist-get info :remote_head) :sha (plist-get info :remote_head))))
-           (should (equal (plist-get copy :state) "ready"))
-           (should (file-directory-p (plist-get copy :directory)))
-           (should-not (equal (plist-get copy :arc_store) (plist-get (my-wt-mount-entry (my-wt-json (cdr (my-wt-call user-emacs-directory arcit-arc-executable "mount" "--list" "--json"))) (plist-get source :vcs_root)) :store)))
-           (let (done)
-             (my-wt-delete copy (lambda (error) (setq done (or error 'ok))))
-             (my-wt-test-wait (lambda () done) 120)
-             (should (eq done 'ok)))
-           (should-not (file-exists-p (plist-get copy :vcs_root)))
-           (should (equal before (cdr (my-wt-call (plist-get source :vcs_root) arcit-arc-executable "info" "--json")))))
-       ;; Test cleanup only: forget the temporary mount if the code under test refused to.
-       (when (and copy (file-exists-p (plist-get copy :vcs_root)))
-         (my-wt-call user-emacs-directory arcit-arc-executable "unmount" "--forget"
-                     (directory-file-name (plist-get copy :vcs_root))))))))
+     (should (zerop (car branches)))
+     (let (done failure plan)
+       (my-wt-arc-prepare source (list :branch (concat "emacs-wt-missing-" (my-pi-history-id)))
+         (lambda (p e) (setq plan p failure e done t)))
+       (my-wt-test-wait (lambda () done) 60)
+       (should-not plan)
+       (should (string-match-p "does not exist" failure)))
+     (should (equal copies (my-wt-copies (plist-get source :project_id))))
+     (should-not (file-exists-p (my-wt-base)))
+     (should (equal branches (my-wt-call source-dir arcit-arc-executable "branch" "--list" "--all" "--json"))))))
+
+(ert-deftest my-wt-real-arc-report-contract ()
+  (skip-unless (and (equal (getenv "EMACS_TEST_REAL_ARC") "1") (getenv "EMACS_TEST_ARC_REMOTE")))
+  (let* ((source-dir (getenv "EMACS_TEST_ARC_SOURCE"))
+         (source (my-wt-register source-dir)) report failure done)
+    (my-wt-arc-ref-report source (list :branch (getenv "EMACS_TEST_ARC_REMOTE") :remote t)
+      (lambda (r e) (setq report r failure e done t)))
+    (my-wt-test-wait (lambda () done) 60)
+    (should-not failure)
+    (should (my-wt-commit-id-p (plist-get report :remote-sha)))
+    (should (equal (plist-get report :remote) (getenv "EMACS_TEST_ARC_REMOTE")))
+    (should (my-wt-arc-user-ref-p (plist-get report :remote)))))
+
+(ert-deftest my-wt-real-arc-native-lifecycle ()
+  (skip-unless (equal (getenv "EMACS_TEST_ARC_LIFECYCLE") "1"))
+  ;; Never wrap a mounted directory in the recursive cleanup of `my-wt-test'.
+  (let* ((user-emacs-directory (file-name-as-directory (make-temp-file "wt-native-real-" t)))
+         (my-pi-history-db nil) (my-wt-busy (make-hash-table :test #'equal))
+         (my-wt-arc-mounts-cache nil) (project-list-file (expand-file-name "projects" user-emacs-directory))
+         (source (my-wt-register (or (getenv "EMACS_TEST_ARC_SOURCE") (error "Set EMACS_TEST_ARC_SOURCE"))))
+         (remote (or (getenv "EMACS_TEST_ARC_REMOTE") (error "Set EMACS_TEST_ARC_REMOTE")))
+         (before (my-wt-context-now source)) report failure done copy)
+    (unwind-protect
+        (progn
+          (my-wt-arc-ref-report source (list :branch remote :remote t)
+            (lambda (r e) (setq report r failure e done t)))
+          (my-wt-test-wait (lambda () done) 60)
+          (should-not failure)
+          (setq copy (my-wt-test-create source (list :branch remote :local remote :remote-ref remote :arc-verified t
+                                                    :sha (plist-get report :remote-sha))))
+          (should (equal (plist-get copy :state) "ready"))
+          (should (equal (plist-get (my-wt-context-now copy) :revision) (plist-get report :remote-sha)))
+          (should-not (equal (plist-get copy :arc_store) (plist-get (my-wt-copy (plist-get source :copy_id)) :arc_store)))
+          (let* ((entries (my-wt-arc-mounts)) (orig (my-wt-mount-entry entries (plist-get source :vcs_root)))
+                 (new (my-wt-mount-entry entries (plist-get copy :vcs_root))))
+            (should (equal (plist-get orig :object-store) (plist-get new :object-store))))
+          (setq done nil)
+          (my-wt-delete copy (lambda (e) (setq failure e done t)))
+          (my-wt-test-wait (lambda () done) 60)
+          (should-not failure)
+          (should (equal (plist-get (my-wt-copy (plist-get copy :copy_id)) :state) "deleted"))
+          (should (equal before (my-wt-context-now source))))
+      (when my-pi-history-db (sqlite-close my-pi-history-db))
+      (message "Arc lifecycle artifacts (kept if failure): %s" user-emacs-directory))))

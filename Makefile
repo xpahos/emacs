@@ -34,7 +34,7 @@ test-worktrees:
 	$(EMACS) -Q --batch -l tests/worktrees-tests.el -f ert-run-tests-batch-and-exit
 	$(EMACS) -Q --batch -l tests/worktree-agent-tests.el -f ert-run-tests-batch-and-exit
 
-# Opt-in: mounts and forgets one temporary Arc copy; the source mount is only read.
+# Opt-in: verifies rejection of missing branches against a real Arc mount (read-only).
 .PHONY: test-worktrees-arc
 test-worktrees-arc:
 	EMACS_TEST_REAL_ARC=1 $(EMACS) -Q --batch -l tests/worktrees-arc-tests.el \
@@ -47,3 +47,10 @@ test-worktrees-gui:
 	  EMACS_TEST_HOME=$$home EMACS_TEST_PHASE=$$phase $(EMACS) -Q -l $(CURDIR)/tests/gui-worktree-smoke.el \
 	    || { cat $$home/failure.txt; echo; exit 1; }; \
 	done; cat $$home/*.passed
+
+# Explicit opt-in: existing remote only; creates/removes a disposable local mount, never pushes.
+.PHONY: test-worktrees-arc-lifecycle
+test-worktrees-arc-lifecycle:
+	@test -n "$(EMACS_TEST_ARC_SOURCE)" -a -n "$(EMACS_TEST_ARC_REMOTE)"
+	EMACS_TEST_REAL_ARC=1 EMACS_TEST_ARC_LIFECYCLE=1 $(EMACS) -Q --batch -l tests/worktrees-arc-tests.el \
+	  --eval '(ert-run-tests-batch-and-exit "real-arc")'

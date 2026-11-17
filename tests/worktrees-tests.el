@@ -70,6 +70,11 @@
     (my-wt-test-wait (lambda () (not (gethash id my-wt-busy))))
     (my-wt-copy id)))
 
+(defun my-wt-test-git-copy (source branch)
+  "Prepare an existing fixture branch, then create its working copy."
+  (my-wt-test-git (plist-get source :vcs_root) "branch" branch)
+  (my-wt-test-create source (list :branch branch)))
+
 ;;; Registry and migration
 
 (defun my-wt-test-v1-db (root other)
@@ -100,7 +105,7 @@
      (make-directory root t) (make-directory other t)
      (my-wt-test-v1-db root other)
      (let ((db (my-pi-history-open)))
-       (should (= (caar (sqlite-select db "PRAGMA user_version")) 2))
+       (should (= (caar (sqlite-select db "PRAGMA user_version")) 3))
        (should (equal (sqlite-select db "SELECT session_id,project_root,session_file,read_reply_id FROM chats ORDER BY 1")
                       `(("a" ,root "/s/a.jsonl" "r0") ("b" ,other nil "r2"))))
        (should (plist-get (my-pi-history-get "a") :unread))
@@ -141,7 +146,7 @@
          (sqlite-close db)))
      ;; The next open completes the migration.
      (my-pi-history-open)
-     (should (= (caar (sqlite-select my-pi-history-db "PRAGMA user_version")) 2)))))
+     (should (= (caar (sqlite-select my-pi-history-db "PRAGMA user_version")) 3)))))
 
 (ert-deftest my-wt-same-name-projects-and-branch-identity ()
   (my-wt-test
@@ -225,12 +230,26 @@
     (should (= (length (car (my-wt-filter "bulk" names))) 30))
     (should (cdr (my-wt-filter "bulk" names)))
     (should-not (cdr (my-wt-filter "bulk-1" names)))
-    (should (equal (my-wt-new-branch-name "CLOUD-CLOUD-42-x") "CLOUD-42-x"))
-    (should (equal (my-wt-new-branch-name "CLOUD-42") "CLOUD-42"))
     (should-not (string-search "/" (my-wt-slug "users/me/feature")))
     (should (equal (my-wt-slug "../..") "copy"))))
 
 ;;; Git lifecycle
+
+(ert-deftest my-wt-rejects-explicit-branch-creation ()
+  (dolist (vcs '("git" "arc"))
+    (cl-letf (((symbol-function 'my-wt-call) (lambda (&rest _) (ert-fail "No VCS call expected"))))
+      (should-error (my-wt-plan (list :vcs vcs :state "ready")
+                               '(:branch "missing" :new t :start "HEAD")) :type 'user-error))))
+
+(ert-deftest my-wt-picker-offers-no-branch-creation ()
+  (with-temp-buffer
+    (let ((my-wt-picker-start (make-string 40 ?a))
+          (my-wt-picker-branches '(("existing" :local t))))
+      (cl-letf (((symbol-function 'my-wt-picker-source) (lambda () '(:branch "existing")))
+                ((symbol-function 'my-wt-label) (lambda (_) "existing")))
+        (my-wt-picker-render-branches "existing"))
+      (should (string-search "existing" (buffer-string)))
+      (should-not (string-search "New branch" (buffer-string))))))
 
 (ert-deftest my-wt-git-create-and-remove-leaves-source-unchanged ()
   (my-wt-test
@@ -240,7 +259,7 @@
      (my-wt-test-git repo "branch" "existing")
      (with-temp-file (expand-file-name "sub/a.txt" repo) (insert "dirty source\n"))
      (let ((status (my-wt-test-git repo "status" "--porcelain"))
-           (copy (my-wt-test-create source (list :branch "CLOUD-7/new" :new t :start head))))
+           (copy (my-wt-test-git-copy source "CLOUD-7/new")))
        (should (equal (plist-get copy :state) "ready"))
        (should (string-prefix-p (my-wt-base) (plist-get copy :vcs_root)))
        (should (equal (plist-get copy :directory) (expand-file-name "sub/" (plist-get copy :vcs_root))))
@@ -270,14 +289,14 @@
    (let* ((repo (my-wt-test-repo (expand-file-name "repo/" tmp)))
           (source (my-wt-register repo))
           (head (my-wt-test-git repo "rev-parse" "HEAD")))
-     (should-error (my-wt-create source (list :branch "bad..name" :new t :start head)) :type 'user-error)
+     (should-error (my-wt-create source (list :branch "bad..name")) :type 'user-error)
      (should-error (my-wt-create source (list :branch "main" :new t :start head)) :type 'user-error)
      (my-wt-test-git repo "worktree" "add" "-q" "-b" "outside" (expand-file-name "external" tmp))
      (should-error (my-wt-create source (list :branch "outside")) :type 'user-error)
      (should (member (my-wt-original (plist-get source :project_id)) (list (my-wt-original (plist-get source :project_id)))))
      (should (my-wt-delete-blockers source))
      (should-error (my-wt-delete source) :type 'user-error)
-     (let ((copy (my-wt-test-create source (list :branch "work" :new t :start head))))
+     (let ((copy (my-wt-test-git-copy source "work")))
        (dolist (name '("untracked.txt" "build.log"))
          (with-temp-file (expand-file-name name (plist-get copy :directory)) (insert "user data\n"))
          (let (done)
@@ -297,9 +316,22 @@
   (my-wt-test
    (let* ((repo (my-wt-test-repo (expand-file-name "repo/" tmp)))
           (source (my-wt-register repo))
-          (copy (my-wt-test-create source (list :branch "late" :new t :start "0000000000000000000000000000000000000001"))))
+          (copy (cl-letf (((symbol-function 'my-wt-run)
+                          (lambda (_dir _program _args callback) (funcall callback 1 "" "temporary failure"))))
+                  (my-wt-test-git-copy source "late"))))
      (should (equal (plist-get copy :state) "failed"))
      (should (plist-get copy :error))
+     ;; A deleted local branch must not be recreated from a remote on retry.
+     (my-wt-test-git repo "update-ref" "refs/remotes/origin/late" "HEAD")
+     (my-wt-test-git repo "branch" "-D" "late")
+     (should-error (my-wt-create source '(:branch "origin/late" :remote t)) :type 'user-error)
+     (my-wt-retry copy)
+     (my-wt-test-wait (lambda () (not (gethash (plist-get copy :copy_id) my-wt-busy))))
+     (should (equal (plist-get (my-wt-copy (plist-get copy :copy_id)) :state) "failed"))
+     (should-not (zerop (car (my-wt-call repo "git" "show-ref" "--verify" "refs/heads/late"))))
+     (should-not (file-exists-p (plist-get copy :vcs_root)))
+     ;; The user can prepare the branch separately and retry the same copy.
+     (my-wt-test-git repo "branch" "late")
      (my-wt-update (plist-get copy :copy_id) :start_revision (my-wt-test-git repo "rev-parse" "HEAD"))
      (my-wt-retry (my-wt-copy (plist-get copy :copy_id)))
      (my-wt-test-wait (lambda () (not (gethash (plist-get copy :copy_id) my-wt-busy))))
@@ -315,6 +347,36 @@
      (should (file-directory-p (plist-get copy :directory))))))
 
 ;;; Arc lifecycle with mocked commands
+
+(ert-deftest my-wt-git-never-guesses-a-branch-deleted-after-preflight ()
+  (dolist (phase '(add switch))
+    (my-wt-test
+     (let* ((repo (my-wt-test-repo (expand-file-name "repo/" tmp)))
+            (source (my-wt-register repo))
+            (run (symbol-function 'my-wt-run)) copy)
+       (my-wt-test-git repo "branch" "side")
+       (my-wt-test-git repo "config" "remote.origin.url" repo)
+       (my-wt-test-git repo "config" "remote.origin.fetch" "+refs/heads/*:refs/remotes/origin/*")
+       (my-wt-test-git repo "update-ref" "refs/remotes/origin/side" "HEAD")
+       (cl-letf (((symbol-function 'my-wt-run)
+                  (lambda (dir program args callback)
+                    (when (if (eq phase 'add)
+                              (equal (seq-take args 2) '("worktree" "add"))
+                            (equal (car args) "switch"))
+                      (my-wt-test-git repo "branch" "-D" "side"))
+                    (funcall run dir program args callback))))
+         (setq copy (my-wt-test-create source '(:branch "side"))))
+       (should (equal (plist-get copy :state) "failed"))
+       (should-not (zerop (car (my-wt-call repo "git" "show-ref" "--verify" "refs/heads/side"))))
+       (if (eq phase 'add)
+           (should-not (file-exists-p (plist-get copy :vcs_root)))
+         ;; A failed switch leaves a registered detached copy; retry must reuse it.
+         (should (file-exists-p (plist-get copy :vcs_root))))
+       (my-wt-test-git repo "branch" "side")
+       (my-wt-retry copy)
+       (my-wt-test-wait (lambda () (not (gethash (plist-get copy :copy_id) my-wt-busy))))
+       (should (equal (plist-get (my-wt-copy (plist-get copy :copy_id)) :state) "ready"))
+       (should (equal (my-wt-test-git (plist-get copy :vcs_root) "symbolic-ref" "--short" "HEAD") "side"))))))
 
 (defmacro my-wt-test-arc (responses &rest body)
   "Run BODY with Arc commands answered from RESPONSES, an alist of (ARGS-PREFIX . FUNCTION).
@@ -362,47 +424,9 @@ Each FUNCTION gets the directory and returns (STATUS STDOUT)."
               (list `((mount . ,(directory-file-name new-store)) (status . "mounted") (store . ,(if shared "/s/orig" "/s/new"))
                       (object-store . ,(if shared "/s/orig/o" "/s/new/o")) (tenant . "cloudia")))))))
 
-(ert-deftest my-wt-arc-create-records-independent-store ()
-  (my-wt-test
-   (let* ((source (my-wt-test-arc-source tmp)) mounted)
-     (my-wt-test-arc
-      (list (cons '("mount" "--list") (lambda (&rest _) (list 0 (my-wt-test-mounts source mounted))))
-            (cons '("mount" "--repository" "cloudia")
-                  (lambda (_dir args) (setq mounted (car (last args)))
-                    (make-directory (expand-file-name "cloud/compute" mounted) t) '(0 "")))
-            (cons '("branch" "--list") (lambda (&rest _) '(0 "[{\"name\":\"trunk\",\"local\":true}]")))
-            (cons '("log") (lambda (&rest _) '(0 "[]")))
-            (cons '("checkout") (lambda (&rest _) '(0 "")))
-            (cons '("info") (lambda (&rest _) '(0 "{\"branch\":\"CLOUD-9\",\"hash\":\"a1\"}"))))
-      (let ((copy (my-wt-test-create source (list :branch "CLOUD-9" :new t :start "a1" :sha "a1"))))
-        (should (equal (plist-get copy :state) "ready"))
-        (should (equal (plist-get copy :arc_store) "/s/new"))
-        (should (equal (plist-get copy :arc_object_store) "/s/new/o"))
-        (should (equal (plist-get copy :arc_repository) "cloudia"))
-        (should (equal (plist-get copy :relative_path) "cloud/compute/"))
-        (should (member (list (directory-file-name (plist-get copy :vcs_root)) "checkout" "-b" "CLOUD-9" "a1")
-                        (mapcar (lambda (e) (cons (directory-file-name (car e)) (cdr e))) arc-log)))
-        ;; Unmount runs from outside the mount.
-        (should-not (cl-find-if (lambda (e) (equal (cadr e) "unmount")) arc-log)))))))
 
-(ert-deftest my-wt-arc-unpublished-start-and-shared-store-fail-recoverably ()
-  (my-wt-test
-   (let* ((source (my-wt-test-arc-source tmp)) mounted shared)
-     (my-wt-test-arc
-      (list (cons '("mount" "--list") (lambda (&rest _) (list 0 (my-wt-test-mounts source mounted shared))))
-            (cons '("mount" "--repository") (lambda (_dir args) (setq mounted (car (last args))) (make-directory mounted t) '(0 "")))
-            (cons '("branch" "--list") (lambda (&rest _) '(0 "[]")))
-            (cons '("log") (lambda (&rest _) '(1 "Error: NoSuchObject: Can't load object")))
-            (cons '("checkout") (lambda (&rest _) (error "checkout must not run"))))
-      (let ((copy (my-wt-test-create source (list :branch "CLOUD-9" :new t :start "b2" :sha "b2"))))
-        (should (equal (plist-get copy :state) "failed"))
-        (should (string-match-p "not available in the new mount" (plist-get copy :error)))
-        (should (file-directory-p (plist-get copy :vcs_root)))
-        (should-not (cl-find-if (lambda (e) (member (cadr e) '("unmount" "checkout"))) arc-log)))
-      (setq shared t mounted nil)
-      (let ((copy (my-wt-test-create source (list :branch "CLOUD-10" :new t :start "a1" :sha "a1"))))
-        (should (equal (plist-get copy :state) "failed"))
-        (should (string-match-p "shares the original store" (plist-get copy :error))))))))
+
+
 
 (defun my-wt-test-arc-copy (source root)
   "Register an application-owned Arc copy mounted at ROOT, started at sha a."
@@ -415,7 +439,7 @@ Each FUNCTION gets the directory and returns (STATUS STDOUT)."
 
 (defun my-wt-test-arc-delete-responses (source root state)
   "Mocked Arc answers for deleting the copy at ROOT; STATE is a plist of overrides."
-  (list (cons '("mount" "--list") (lambda (&rest _) (list 0 (my-wt-test-mounts source root))))
+  (list (cons '("worktree" "list") (lambda (&rest _) (list 0 (my-wt-test-mounts source root))))
         (cons '("info") (lambda (&rest _) (list 0 (plist-get (car state) :info))))
         (cons '("status") (lambda (&rest _) '(0 "{\"status\":{}}")))
         (cons '("stash") (lambda (&rest _) '(0 "")))
@@ -485,80 +509,11 @@ Each FUNCTION gets the directory and returns (STATUS STDOUT)."
              (should (equal (reverse events) '(own-server kill)))))
        (when (buffer-live-p buffer) (kill-buffer buffer))))))
 
-(ert-deftest my-wt-delete-release-error-restores-state-without-unmounting ()
-  (my-wt-test
-   (let* ((source (my-wt-test-arc-source tmp))
-          (root (file-name-as-directory (expand-file-name "copy-mount" tmp)))
-          (a (my-wt-test-sha ?a))
-          (state (list (list :info (format "{\"hash\":\"%s\",\"remote_head\":\"%s\"}" a a)
-                             :branches "[]" :unmount '(0 "")))))
-     (my-wt-test-arc-copy source root)
-     (my-wt-test-arc (my-wt-test-arc-delete-responses source root state)
-       (dolist (previous '("ready" "failed"))
-         (my-wt-update "ac" :state previous)
-         (let ((calls 0) result)
-           (cl-letf (((symbol-function 'my-wt-release) (lambda (_) (error "Eglot shutdown failed"))))
-             (my-wt-delete (my-wt-copy "ac") (lambda (err) (cl-incf calls) (setq result err))))
-           (should (= calls 1))
-           (should (string-match-p "Eglot shutdown failed" result))
-           (should (equal (plist-get (my-wt-copy "ac") :error) result))
-           (should (equal (plist-get (my-wt-copy "ac") :state) previous))
-           (should-not (gethash "ac" my-wt-busy))))
-       (should-not (cl-find-if (lambda (e) (equal (cadr e) "unmount")) arc-log))
-       (should (file-directory-p root))))))
 
-(ert-deftest my-wt-arc-delete-checks-store-commits-and-never-removes-on-failure ()
-  (my-wt-test
-   (let* ((source (my-wt-test-arc-source tmp))
-          (root (file-name-as-directory (expand-file-name "copy-mount" tmp)))
-          (a (my-wt-test-sha ?a)) (b (my-wt-test-sha ?b)) (c (my-wt-test-sha ?c))
-          (state (list (list :info (format "{\"branch\":\"CLOUD-9\",\"hash\":\"%s\",\"remote_head\":\"%s\"}" b c)
-                             :branches (my-wt-test-branches (list "CLOUD-9" b t) (list "trunk" a t "cloudia/trunk")
-                                                            (list "cloudia/trunk" a nil))
-                             :unmount '(1 "Error: device busy")))))
-     (my-wt-test-arc-copy source root)
-     (my-wt-test-arc (my-wt-test-arc-delete-responses source root state)
-       ;; A task branch beyond its start commit and remote head blocks --forget.
-       (should (string-match-p "CLOUD-9.*only in this copy's store" (my-wt-test-delete-result (my-wt-copy "ac"))))
-       (should-not (cl-find-if (lambda (e) (equal (cadr e) "unmount")) arc-log))
-       ;; Published everywhere: an unmount failure is reported and nothing is removed.
-       (setf (car state) (plist-put (car state) :info (format "{\"branch\":\"CLOUD-9\",\"hash\":\"%s\",\"remote_head\":\"%s\"}" b b)))
-       (should (string-match-p "device busy" (my-wt-test-delete-result (my-wt-copy "ac"))))
-       (should (file-directory-p (expand-file-name "cloud/compute" root)))
-       (should (equal (plist-get (my-wt-copy "ac") :state) "ready"))
-       (setf (car state) (plist-put (car state) :unmount '(0 "")))
-       (should (eq (my-wt-test-delete-result (my-wt-copy "ac")) 'ok))
-       (should (equal (plist-get (my-wt-copy "ac") :state) "deleted"))
-       (should (member (list "unmount" "--forget" (directory-file-name root)) (mapcar #'cdr arc-log)))))))
 
-(ert-deftest my-wt-arc-delete-blocks-unpublished-trunk ()
-  (my-wt-test
-   (let* ((source (my-wt-test-arc-source tmp))
-          (root (file-name-as-directory (expand-file-name "copy-mount" tmp)))
-          (a (my-wt-test-sha ?a)) (d (my-wt-test-sha ?d)) (e (my-wt-test-sha ?e))
-          ;; The task branch is at its published start; trunk holds a local-only commit.
-          (state (list (list :info (format "{\"branch\":\"CLOUD-9\",\"hash\":\"%s\",\"remote_head\":\"%s\"}" a a)
-                             :branches (my-wt-test-branches (list "CLOUD-9" a t) (list "trunk" d t "cloudia/trunk")
-                                                            (list "cloudia/trunk" e nil))
-                             :merge-base (concat e "\n") :unmount '(0 "")))))
-     (my-wt-test-arc-copy source root)
-     (my-wt-test-arc (my-wt-test-arc-delete-responses source root state)
-       (should (string-match-p "trunk" (my-wt-test-delete-result (my-wt-copy "ac"))))
-       (should-not (cl-find-if (lambda (e) (equal (cadr e) "unmount")) arc-log))
-       ;; Trunk without any remote evidence is just as unsafe.
-       (setf (car state) (plist-put (car state) :branches (my-wt-test-branches (list "CLOUD-9" a t) (list "trunk" d t))))
-       (should (string-match-p "trunk" (my-wt-test-delete-result (my-wt-copy "ac"))))
-       ;; So is a branch whose commit Arc does not report.
-       (setf (car state) (plist-put (car state) :branches "[{\"name\":\"CLOUD-9\",\"local\":true},{\"name\":\"trunk\",\"local\":true}]"))
-       (should (stringp (my-wt-test-delete-result (my-wt-copy "ac"))))
-       (should-not (cl-find-if (lambda (e) (equal (cadr e) "unmount")) arc-log))
-       ;; A trunk merely behind its published upstream is safe.
-       (setf (car state) (plist-put (plist-put (car state) :branches
-                                               (my-wt-test-branches (list "CLOUD-9" a t) (list "trunk" d t "cloudia/trunk")
-                                                                    (list "cloudia/trunk" e nil)))
-                                    :merge-base (concat d "\n")))
-       (should (eq (my-wt-test-delete-result (my-wt-copy "ac")) 'ok))
-       (should (cl-find-if (lambda (e) (equal (cadr e) "unmount")) arc-log))))))
+
+
+
 
 (ert-deftest my-wt-arc-availability-needs-the-recorded-mount ()
   (my-wt-test
@@ -567,7 +522,7 @@ Each FUNCTION gets the directory and returns (STATUS STDOUT)."
           (mounted nil) (store "/s/new"))
      (my-wt-test-arc-copy source root)
      (my-wt-test-arc
-      (list (cons '("mount" "--list")
+      (list (cons '("worktree" "list")
                   (lambda (&rest _)
                     (list 0 (json-serialize
                              (vconcat (list `((mount . ,(directory-file-name (plist-get source :vcs_root))) (status . "mounted") (store . "/s/orig")))
@@ -598,7 +553,7 @@ Each FUNCTION gets the directory and returns (STATUS STDOUT)."
           (root (expand-file-name "sub/" repo)))
      (my-project-open root)
      (let* ((source (my-wt-tab-copy))
-            (copy (my-wt-test-create source (list :branch "side" :new t :start (my-wt-test-git repo "rev-parse" "HEAD"))))
+            (copy (my-wt-test-git-copy source "side"))
             (original-file (find-file (expand-file-name "a.txt" root))))
        (insert "unsaved original edit ")
        (my-wt-switch copy)
@@ -695,7 +650,7 @@ Each FUNCTION gets the directory and returns (STATUS STDOUT)."
      ;; A running Emacs holds a connection opened by the previous configuration.
      (setq my-pi-history-db (sqlite-open (my-pi-history-path)))
      (load (expand-file-name "pi-history.el" my-wt-test-config) nil t)
-     (should (= (caar (sqlite-select my-pi-history-db "PRAGMA user_version")) 2))
+     (should (= (caar (sqlite-select my-pi-history-db "PRAGMA user_version")) 3))
      (should (equal (mapcar (lambda (c) (plist-get c :id)) (my-pi-history-list root)) '("a"))))))
 
 (defun my-wt-test-tab-files ()
@@ -707,7 +662,7 @@ Each FUNCTION gets the directory and returns (STATUS STDOUT)."
           (root (expand-file-name "sub/" repo)))
      (my-project-open root)
      (let* ((source (my-wt-tab-copy))
-            (copy (my-wt-test-create source (list :branch "side" :new t :start (my-wt-resolve-start source))))
+            (copy (my-wt-test-git-copy source "side"))
             (original-file (expand-file-name "a.txt" root))
             (copy-file (expand-file-name "a.txt" (plist-get copy :directory))))
        (find-file original-file)
@@ -728,7 +683,7 @@ Each FUNCTION gets the directory and returns (STATUS STDOUT)."
           (root (expand-file-name "sub/" repo)))
      (my-project-open root)
      (let* ((source (my-wt-tab-copy))
-            (copy (my-wt-test-create source (list :branch "side" :new t :start (my-wt-resolve-start source))))
+            (copy (my-wt-test-git-copy source "side"))
             (original (find-file (expand-file-name "a.txt" root))))
        (insert "unsaved original edit")
        (my-wt-switch copy)
@@ -812,12 +767,14 @@ Each FUNCTION gets the directory and returns (STATUS STDOUT)."
 (defun my-wt-test-arc-prepare (source state)
   "Mocked Arc for creating a copy; STATE is a one-element list holding a plist:
 :branches (fresh store's -vv list), :head (branch . commit) after checkout."
-  (list (cons '("mount" "--list") (lambda (&rest _) (list 0 (my-wt-test-mounts source (plist-get (car state) :mounted)))))
+  (list (cons '("worktree" "list") (lambda (&rest _) (list 0 (my-wt-test-mounts source (plist-get (car state) :mounted)))))
         (cons '("mount" "--repository")
               (lambda (_dir args) (let ((root (car (last args))))
                                     (setf (car state) (plist-put (car state) :mounted root))
                                     (make-directory (expand-file-name "cloud/compute" root) t))
                 '(0 "")))
+        (cons '("branch" "--list" "--all")
+              (lambda (&rest _) (list 0 (or (plist-get (car state) :source-branches) (plist-get (car state) :branches)))))
         (cons '("branch" "--list") (lambda (&rest _) (list 0 (plist-get (car state) :branches))))
         (cons '("log") (lambda (&rest _) '(0 "[]")))
         (cons '("checkout") (lambda (_dir args)
@@ -832,63 +789,26 @@ Each FUNCTION gets the directory and returns (STATUS STDOUT)."
 (defun my-wt-test-checkouts (arc-log)
   (mapcar #'cdr (cl-remove-if-not (lambda (e) (equal (cadr e) "checkout")) arc-log)))
 
-(ert-deftest my-wt-arc-existing-branch-at-requested-revision-is-reused ()
+(ert-deftest my-wt-arc-missing-source-branch-fails-before-creating-copy ()
   (my-wt-test
-   (let* ((source (my-wt-test-arc-source tmp)) (a (my-wt-test-sha ?a))
-          (state (list (list :branches (my-wt-test-branches (list "trunk" a t "cloudia/trunk")) :existing a))))
-     (my-wt-test-arc (my-wt-test-arc-prepare source state)
-       (let ((copy (my-wt-test-create source (list :branch "cloudia/trunk" :remote t :sha a))))
-         (should (equal (plist-get copy :state) "ready"))
-         (should (equal (my-wt-test-checkouts arc-log) '(("checkout" "trunk")))))))))
+   (let* ((source (my-wt-test-arc-source tmp))
+          (before (my-wt-copies (plist-get source :project_id))))
+     (dolist (response '((0 "[]") (1 "daemon unavailable") (0 "invalid JSON")))
+       (my-wt-test-arc
+        (list (cons '("branch" "--list") (lambda (&rest _) response)))
+        (should-error (my-wt-create source (list :branch "missing" :sha (my-wt-test-sha ?a))) :type 'user-error)
+        (should (equal before (my-wt-copies (plist-get source :project_id))))
+        (should-not arc-log)
+        (should-not (file-exists-p (my-wt-base))))))))
 
-(ert-deftest my-wt-arc-existing-branch-at-other-revision-fails-untouched ()
-  (my-wt-test
-   (let* ((source (my-wt-test-arc-source tmp)) (a (my-wt-test-sha ?a)) (b (my-wt-test-sha ?b))
-          ;; The source's trunk was at A when selected; the fresh store's trunk is at B.
-          (state (list (list :branches (my-wt-test-branches (list "trunk" b t "cloudia/trunk")) :existing b))))
-     (my-wt-test-arc (my-wt-test-arc-prepare source state)
-       (let ((copy (my-wt-test-create source (list :branch "cloudia/trunk" :remote t :sha a))))
-         (should (equal (plist-get copy :state) "failed"))
-         (should (string-match-p "already exists in the new mount at b+, not at the requested a+" (plist-get copy :error)))
-         (should-not (my-wt-test-checkouts arc-log))     ; neither switched to B nor rewritten
-         (should (file-directory-p (plist-get copy :vcs_root)))
-         (should (equal (plist-get copy :start_revision) a)))))))
 
-(ert-deftest my-wt-arc-retry-never-overwrites-local-work ()
-  (my-wt-test
-   (let* ((source (my-wt-test-arc-source tmp)) (a (my-wt-test-sha ?a)) (c (my-wt-test-sha ?c))
-          (state (list (list :branches "[]"))))
-     (my-wt-test-arc (my-wt-test-arc-prepare source state)
-       ;; First attempt creates the branch at the captured revision.
-       (let* ((copy (my-wt-test-create source (list :branch "CLOUD-5" :new t :start a :sha a)))
-              (id (plist-get copy :copy_id)))
-         (should (equal (plist-get copy :state) "ready"))
-         ;; Make it fail after mounting: the user then commits on the branch in that copy.
-         (my-wt-update id :state "failed" :error "simulated")
-         (setf (car state) (plist-put (plist-put (car state) :branches (my-wt-test-branches (list "CLOUD-5" c t)))
-                                      :existing c))
-         (setq arc-log nil)
-         (my-wt-retry (my-wt-copy id))
-         (my-wt-test-wait (lambda () (not (gethash id my-wt-busy))))
-         (should (equal (plist-get (my-wt-copy id) :state) "failed"))
-         (should (string-match-p "already exists" (plist-get (my-wt-copy id) :error)))
-         (should-not (my-wt-test-checkouts arc-log))
-         (should-not (cl-find-if (lambda (e) (member (cadr e) '("reset" "branch" "-D"))) (cl-remove-if (lambda (e) (equal (cddr e) '("--list" "-vv" "--json"))) arc-log)))
-         ;; Once the branch is back at the captured revision, retry completes without -b.
-         (setf (car state) (plist-put (plist-put (car state) :branches (my-wt-test-branches (list "CLOUD-5" a t)))
-                                      :existing a))
-         (setq arc-log nil)
-         (my-wt-retry (my-wt-copy id))
-         (my-wt-test-wait (lambda () (not (gethash id my-wt-busy))))
-         (should (equal (plist-get (my-wt-copy id) :state) "ready"))
-         (should (equal (my-wt-test-checkouts arc-log) '(("checkout" "CLOUD-5")))))))))
 
-(ert-deftest my-wt-arc-ready-only-after-verified-checkout ()
-  (my-wt-test
-   (let* ((source (my-wt-test-arc-source tmp)) (a (my-wt-test-sha ?a))
-          (state (list (list :branches "[]"))))
-     (my-wt-test-arc (cons (cons '("info") (lambda (&rest _) (list 0 (json-serialize '((branch . "trunk") (hash . "0000"))))))
-                           (my-wt-test-arc-prepare source state))
-       (let ((copy (my-wt-test-create source (list :branch "CLOUD-6" :new t :start a :sha a))))
-         (should (equal (plist-get copy :state) "failed"))
-         (should (string-match-p "not CLOUD-6" (plist-get copy :error))))))))
+
+
+
+
+
+
+
+
+(load (expand-file-name "worktrees-native-arc-tests.el" (file-name-directory load-file-name)) nil t)

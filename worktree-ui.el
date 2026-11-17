@@ -14,6 +14,7 @@
 (defvar-local my-wt-picker-branches nil)
 (defvar-local my-wt-picker-generation 0)
 (defvar-local my-wt-picker-error nil)
+(defvar-local my-wt-picker-preview nil "Plist with :text :label :action for the current Arc operation.")
 (defvar-local my-wt-picker-start nil "Source commit captured when branch selection began.")
 
 (defface my-wt-search-field
@@ -100,7 +101,10 @@
        (setq my-wt-picker-input-start (copy-marker input-start)
              my-wt-picker-input-end (copy-marker input-end t))))
     (when my-wt-picker-error (insert (propertize (concat "  " my-wt-picker-error "\n\n") 'face 'error)))
-    (if (eq my-wt-picker-mode 'copies) (my-wt-picker-render-copies) (my-wt-picker-render-branches query))
+    (pcase my-wt-picker-mode
+      ('copies (my-wt-picker-render-copies))
+      ('preview (my-wt-picker-render-preview))
+      (_ (my-wt-picker-render-branches query)))
     (if my-wt-picker-input-start
         (progn
           (put-text-property (point-min) my-wt-picker-input-start 'read-only t)
@@ -152,13 +156,12 @@
       (dolist (branch (car found))
         (insert "  ")
         (my-wt-picker-button (car branch) (lambda () (my-wt-picker-create-existing branch)) 'default "Open this branch in a new copy")
-        (insert "  ")
-        (my-wt-picker-button "New branch from here…" (lambda () (my-wt-picker-create-new (car branch))) 'shadow)
         (insert "\n"))
       (my-wt-picker-more (cdr found)))
-    (insert "\n  ")
-    (my-wt-picker-button (format "+ New branch from current commit%s…" (if start (format " %.7s" start) ""))
-                         (lambda () (my-wt-picker-create-new nil)) 'link)
+    (when (and (equal (plist-get source :vcs) "arc") (my-wt-arc-user-ref-p query))
+      (insert "\n  ")
+      (my-wt-picker-button (concat "Check server branch " query)
+        (lambda () (my-wt-picker-create-existing (list query :remote t)))))
     (insert "\n  ")
     (my-wt-picker-button "Back" (lambda () (setq my-wt-picker-mode 'copies my-wt-picker-query "" my-wt-picker-error nil)
                                   (my-wt-picker-render)) 'shadow)
@@ -198,18 +201,12 @@
       (message "Creating working copy %s…" (plist-get result :tree_name)))))
 
 (defun my-wt-picker-create-existing (branch)
-  (let ((source (my-wt-picker-source)))
-    (my-wt-picker-create (list :branch (car branch) :remote (plist-get (cdr branch) :remote)
-                               :sha (if (equal (plist-get source :vcs) "arc") (my-wt-rev-parse source (car branch))
-                                      (plist-get (cdr branch) :sha))))))
-
-(defun my-wt-picker-create-new (from)
   (let* ((source (my-wt-picker-source))
-         (start (if from (my-wt-rev-parse source from)
-                  (or my-wt-picker-start (user-error "The current commit is unknown"))))
-         (name (my-wt-new-branch-name
-                (read-string (format "New branch from %.10s (%s): " start (or from (my-wt-label source))) "CLOUD-"))))
-    (my-wt-picker-create (list :branch name :new t :start start :sha start))))
+         (spec (list :branch (car branch) :remote (plist-get (cdr branch) :remote)
+                     :sha (plist-get (cdr branch) :sha))))
+    (if (equal (plist-get source :vcs) "arc")
+        (my-wt-picker-arc-create source spec)
+      (my-wt-picker-create spec))))
 
 (defun my-wt-picker-open (copy)
   (my-wt-picker-close)
@@ -222,10 +219,75 @@
 (defun my-wt-picker-delete (copy)
   (if-let* ((blockers (my-wt-delete-blockers copy)))
       (progn (setq my-wt-picker-error (string-join blockers "; ")) (my-wt-picker-render))
-    (when (yes-or-no-p (format "Delete working copy %s (%s)? Its branch and chats are kept. "
-                               (plist-get copy :tree_name) (my-wt-label copy)))
-      (my-wt-picker-close)
-      (my-wt-delete copy))))
+    (if (equal (plist-get copy :vcs) "arc")
+        (my-wt-picker-arc-delete copy)
+      (when (yes-or-no-p (format "Delete working copy %s (%s)? Its branch and chats are kept. "
+                                (plist-get copy :tree_name) (my-wt-label copy)))
+        (my-wt-picker-close)
+        (my-wt-delete copy)))))
+
+(defun my-wt-picker-render-preview ()
+  (insert "  " (or (plist-get my-wt-picker-preview :text) "Checking server state…") "\n\n  ")
+  (when-let* ((action (plist-get my-wt-picker-preview :action)))
+    (my-wt-picker-button (plist-get my-wt-picker-preview :label)
+      (lambda ()
+        (setq my-wt-picker-preview '(:text "Working…"))
+        (my-wt-picker-render)
+        (funcall action)) 'default "Confirm this operation")
+    (insert "\n\n  "))
+  (my-wt-picker-button "Back"
+    (lambda ()
+      (cl-incf my-wt-picker-generation)
+      (setq my-wt-picker-mode 'copies my-wt-picker-preview nil my-wt-picker-error nil)
+      (my-wt-picker-render)) 'shadow))
+
+(defun my-wt-picker-preview-update (buffer generation text &optional label action)
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when (and (= generation my-wt-picker-generation) (eq my-wt-picker-mode 'preview))
+        (setq my-wt-picker-preview (list :text text :label label :action action))
+        (my-wt-picker-render)))))
+
+(defun my-wt-picker-arc-create (source spec)
+  (let ((buffer (current-buffer)) (generation (cl-incf my-wt-picker-generation)))
+    (setq my-wt-picker-mode 'preview my-wt-picker-preview nil my-wt-picker-error nil)
+    (my-wt-picker-render)
+    (my-wt-arc-prepare source spec
+      (lambda (plan error)
+        (my-wt-picker-preview-update buffer generation
+          (or error (concat (my-wt-arc-report-text (plist-get plan :report))
+                            "\n\nOnly committed files are copied."
+                            (when (eq (plist-get plan :action) 'publish) "\nThis will publish the selected commit to the server.")))
+          (unless error (if (eq (plist-get plan :action) 'publish) "Publish and create" "Create worktree"))
+          (unless error
+            (lambda ()
+              (my-wt-arc-start source plan
+                (lambda (copy failure)
+                  (if failure
+                      (progn (message "%s" failure) (my-wt-picker-preview-update buffer generation failure))
+                    (when (and (buffer-live-p buffer)
+                               (= generation (buffer-local-value 'my-wt-picker-generation buffer)))
+                      (my-wt-picker-close) (my-wt-picker-finish copy))))))))))))
+
+(defun my-wt-picker-arc-delete (copy)
+  (let ((buffer (current-buffer)) (generation (cl-incf my-wt-picker-generation)))
+    (setq my-wt-picker-mode 'preview my-wt-picker-preview nil my-wt-picker-error nil)
+    (my-wt-picker-render)
+    (my-wt-arc-delete-report copy
+      (lambda (report error)
+        (let ((blockers (plist-get report :blockers)))
+          (my-wt-picker-preview-update buffer generation
+            (or error (concat (mapconcat #'my-wt-arc-report-text (plist-get report :branches) "\n\n")
+                              "\n\nLocal copy and local branches will be removed. Server branches and chats are kept."
+                              (when blockers (concat "\n\nCannot delete: " (string-join blockers "; ")))))
+            (unless (or error blockers) "Delete worktree")
+            (unless (or error blockers)
+              (lambda ()
+                ;; Release project resources from the parent frame, not the child picker.
+                (my-wt-picker-close)
+                (my-wt-delete copy
+                  (lambda (failure) (when failure (message "Worktree kept: %s" failure)))
+                  (plist-get report :snapshot))))))))))
 
 (defun my-wt-picker-save-geometry ()
   (when (frame-live-p my-wt-picker-frame)

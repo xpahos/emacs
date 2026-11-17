@@ -23,7 +23,7 @@
 
 (defconst my-wt-columns
   '(copy_id project_id role directory vcs_root relative_path vcs arc_repository arc_store
-    arc_object_store owned state tree_name branch start_revision error created_at updated_at last_opened_at))
+    arc_object_store owned state tree_name branch start_revision error created_at updated_at last_opened_at source_copy_id arc_remote_ref))
 
 (defun my-wt--row (row)
   (let (plist)
@@ -144,18 +144,31 @@
             (buffer-string)))))
 
 (defun my-wt-chain (steps done)
-  "Run continuation STEPS in order; DONE gets nil or the first error."
+  "Run STEPS, completing once even when a step signals before calling NEXT."
   (if (not steps) (funcall done nil)
-    (funcall (car steps) (lambda (&optional error) (if error (funcall done error) (my-wt-chain (cdr steps) done))))))
+    (let (advanced)
+      (condition-case failure
+          (funcall (car steps)
+                   (lambda (&optional error)
+                     (unless advanced
+                       (setq advanced t)
+                       (if error (funcall done error) (my-wt-chain (cdr steps) done)))))
+        ((error quit)
+         (unless advanced
+           (setq advanced t)
+           (funcall done (error-message-string failure))))))))
 
 (defun my-wt-step (directory program args &optional check)
-  "A chain step; CHECK receives stdout and returns an error string to stop."
+  "A chain step; report validation errors and quit through NEXT."
   (lambda (next)
     (my-wt-run directory program args
       (lambda (status out err)
-        (funcall next (if (zerop status) (and check (funcall check out))
-                        (format "%s %s failed: %s" (file-name-nondirectory program) (car args)
-                                (my-wt-clean-error (if (string-empty-p err) out err)))))))))
+        (let ((failure (condition-case failure
+                           (if (zerop status) (and check (funcall check out))
+                             (format "%s %s failed: %s" (file-name-nondirectory program) (car args)
+                                     (my-wt-clean-error (if (string-empty-p err) out err))))
+                         ((error quit) (error-message-string failure)))))
+          (funcall next failure))))))
 
 (defun my-wt-clean-error (text)
   "Drop Arc's Full Disk Access banner from TEXT."
@@ -238,7 +251,7 @@ Return (:branch NAME-OR-NIL :revision SHA), nil when unknown; a nil branch means
   (unless (and my-wt-arc-mounts-cache (< (- (float-time) (car my-wt-arc-mounts-cache)) 2))
     (setq my-wt-arc-mounts-cache
           (cons (float-time)
-                (pcase (my-wt-call user-emacs-directory (my-wt-arc) "mount" "--list" "--json")
+                (pcase (my-wt-call user-emacs-directory (my-wt-arc) "worktree" "list" "--json" "--no-status")
                   (`(0 . ,out) (ignore-errors (my-wt-json out)))))))
   (cdr my-wt-arc-mounts-cache))
 
@@ -282,12 +295,6 @@ An empty mount-point directory left after unmounting does not qualify."
       (setq name (format "%s-%s" (my-wt-slug branch) (substring (my-pi-history-id) 0 4))
             root (file-name-as-directory (expand-file-name name parent))))
     (cons name root)))
-
-(defun my-wt-new-branch-name (input)
-  "Normalize INPUT typed after the prefilled CLOUD- prefix."
-  (let ((name (string-trim input)))
-    (while (string-prefix-p "CLOUD-CLOUD-" name) (setq name (substring name 6)))
-    name))
 
 ;;; Branch listing
 
@@ -348,38 +355,36 @@ Never a regexp; blank queries match nothing.  Return (MATCHES . MORE-P)."
     (_ (user-error "Cannot resolve %s in %s" revision (plist-get copy :directory)))))
 
 (cl-defun my-wt-plan (source spec)
-  "Validate SPEC (:branch :new :start :sha :remote) for SOURCE; return a full plan.
+  "Validate an existing branch SPEC (:branch :sha :remote) for SOURCE.
 Return (:occupied COPY) when an existing registered copy already has the branch."
+  (when (plist-get spec :new)
+    (user-error "Creating branches is disabled; select an existing local branch"))
   (let* ((vcs (plist-get source :vcs)) (branch (plist-get spec :branch)) (dir (plist-get source :vcs_root))
          ;; origin/foo and cloudia/users/x/foo become local foo and users/x/foo.
          (local (if (plist-get spec :remote) (replace-regexp-in-string "\\`[^/]+/" "" branch) branch)))
     (unless (member vcs '("git" "arc")) (user-error "This project is not in a Git repository or Arc mount"))
     (unless (equal (plist-get source :state) "ready") (user-error "The source copy is not available"))
     (when (string-empty-p (string-trim (or branch ""))) (user-error "Enter a branch name"))
-    (when-let* (((equal vcs "arc"))
-                (copy (cl-find-if (lambda (c) (and (not (member (plist-get c :state) '("deleted" "failed")))
-                                                  (equal (my-wt-label c) local)))
-                                  (my-wt-copies (plist-get source :project_id)))))
-      (unless (plist-get spec :new)
-        (cl-return-from my-wt-plan (list :occupied copy))))
+    (when (equal vcs "arc")
+      (unless (and (plist-get spec :arc-verified) (plist-get spec :remote-ref)
+                   (my-wt-commit-id-p (plist-get spec :sha)))
+        (user-error "Preview and verify the Arc server branch before creating a copy"))
+      (cl-return-from my-wt-plan spec))
     (if (equal vcs "git")
         (progn
           (unless (zerop (car (my-wt-call dir "git" "check-ref-format" "--branch" local)))
             (user-error "Invalid Git branch name: %s" local))
           (let ((exists (zerop (car (my-wt-call dir "git" "rev-parse" "--verify" "--quiet" (concat "refs/heads/" local))))))
-            (when (and (plist-get spec :new) exists)
-              (user-error "Branch %s already exists; select it as an existing branch" local))
-            (when-let* (((not (plist-get spec :new))) (occupant (my-wt-git-occupant source local)))
+            (unless exists
+              (user-error "Local branch %s does not exist; creating branches is disabled" local))
+            (when-let* ((occupant (my-wt-git-occupant source local)))
               (if-let* ((copy (car (my-wt--select "WHERE project_id=? AND vcs_root=? AND state<>'deleted'"
                                                   (list (plist-get source :project_id) occupant)))))
                   (cl-return-from my-wt-plan (list :occupied copy))
                 (user-error "Branch %s is checked out in an external worktree at %s; it was not forced"
                             local occupant)))
             (append (list :local local :exists exists) spec)))
-      ;; Arc validates names on checkout; reject what can never be a ref.
-      (when (or (string-match-p "[[:space:]~^:?*[\\]" local) (string-match-p "\\.\\.\\|//\\|\\`/\\|/\\'\\|\\.lock\\'\\|@{" local))
-        (user-error "Invalid Arc branch name: %s" local))
-      (append (list :local local) spec))))
+      (error "Unsupported worktree backend"))))
 
 (defun my-wt-create (source spec &optional callback)
   "Create a copy of SOURCE's project as planned by SPEC; CALLBACK gets the copy."
@@ -402,12 +407,15 @@ Return (:occupied COPY) when an existing registered copy already has the branch.
              (list id (plist-get project :id) directory root (or (plist-get source :relative_path) "") vcs
                    (plist-get source :arc_repository) (car place) (plist-get plan :local)
                    (or (plist-get plan :sha) (plist-get plan :start)) (my-pi-history-now)))))
+        (when (equal vcs "arc")
+          (my-wt-update id :source_copy_id (plist-get source :copy_id) :arc_remote_ref (plist-get plan :remote-ref)))
         (my-wt-build (my-wt-copy id) plan callback)
         (my-wt-copy id)))))
 
 (defun my-wt-build (copy plan callback)
   "Run (or resume) the VCS steps that turn the creating record COPY into a ready copy."
-  (let* ((id (plist-get copy :copy_id)) (source (my-wt-original (plist-get copy :project_id))))
+  (let* ((id (plist-get copy :copy_id)) (source (or (and (plist-get copy :source_copy_id) (my-wt-copy (plist-get copy :source_copy_id)))
+                     (my-wt-original (plist-get copy :project_id)))))
     (puthash id t my-wt-busy)
     (make-directory (file-name-directory (directory-file-name (plist-get copy :vcs_root))) t)
     (my-wt-chain
@@ -428,14 +436,14 @@ Return (:occupied COPY) when an existing registered copy already has the branch.
      (lambda (next)
        ;; A worktree registered by an interrupted attempt is resumed, not duplicated.
        (if (and (file-exists-p (expand-file-name ".git" root))
-                (equal (my-wt-git-occupant source local) (my-wt-dir root)))
+                (member (concat "worktree " (directory-file-name root))
+                        (split-string (cdr (my-wt-call (plist-get source :vcs_root) "git"
+                                                       "worktree" "list" "--porcelain")) "\n")))
            (funcall next)
+         ;; Bare names let worktree add create a branch from a matching remote.
          (funcall (my-wt-step (plist-get source :vcs_root) "git"
-                              (cond ((plist-get plan :new) (list "worktree" "add" "-b" local root (plist-get plan :start)))
-                                    ((or (plist-get plan :exists) (not (plist-get plan :remote)))
-                                     (list "worktree" "add" root local))
-                                    (t (list "worktree" "add" "--track" "-b" local root (plist-get plan :branch)))))
-                  next)))
+                             (list "worktree" "add" "--detach" root (concat "refs/heads/" local))) next)))
+     (my-wt-step root "git" (list "switch" "--no-guess" local))
      (lambda (next)
        (funcall next (unless (file-directory-p (plist-get copy :directory))
                        (format "%s does not exist on branch %s" (plist-get copy :relative_path) local)))))))
@@ -443,73 +451,13 @@ Return (:occupied COPY) when an existing registered copy already has the branch.
 (defun my-wt-mount-entry (entries directory)
   (cl-find-if (lambda (e) (equal (my-wt-dir (plist-get e :mount)) (my-wt-dir directory))) entries))
 
-(defun my-wt-arc-steps (source copy plan)
-  "Mount a fresh store, verify it is independent, then check out the captured revision."
-  (let* ((arc (my-wt-arc)) (root (directory-file-name (plist-get copy :vcs_root)))
-         (id (plist-get copy :copy_id)) (base (my-wt-base))
-         (sha (plist-get plan :sha)) (local (plist-get plan :local)) entries reuse)
-    (list
-     (my-wt-step base arc '("mount" "--list" "--json")
-       (lambda (out) (setq entries (my-wt-json out))
-         (unless (my-wt-mount-entry entries (plist-get source :vcs_root)) "The source Arc mount is not mounted")))
-     (lambda (next)
-       (let ((repository (or (plist-get copy :arc_repository)
-                             (plist-get (gethash (plist-get source :directory) my-wt-branches) :repository)
-                             (plist-get (my-wt-mount-entry entries (plist-get source :vcs_root)) :tenant))))
-         (my-wt-update id :arc_repository repository)
-         (if (my-wt-mount-entry entries root) (funcall next) ; resume after an interrupted mount
-           (funcall (my-wt-step base arc (list "mount" "--repository" repository root)) next))))
-     (my-wt-step base arc '("mount" "--list" "--json")
-       (lambda (out)
-         (let* ((entries (my-wt-json out)) (mine (my-wt-mount-entry entries root))
-                (original (my-wt-mount-entry entries (plist-get source :vcs_root))))
-           (cond ((not mine) "Arc reported success but the new mount is not listed")
-                 ((or (equal (plist-get mine :store) (plist-get original :store))
-                      (equal (plist-get mine :object-store) (plist-get original :object-store)))
-                  "The new mount shares the original store; refusing to use it")
-                 (t (my-wt-update id :state "preparing" :arc_store (plist-get mine :store)
-                                  :arc_object_store (plist-get mine :object-store))
-                    nil)))))
-     (my-wt-step root arc '("branch" "--list" "-vv" "--json")
-       (lambda (out)
-         ;; An existing branch (a fresh store's trunk, or one made by an earlier
-         ;; attempt) is used only if it is exactly at the captured revision;
-         ;; otherwise it is left untouched and preparation fails.
-         (when-let* ((existing (cl-find-if (lambda (b) (and (plist-get b :local) (equal (plist-get b :name) local)))
-                                           (my-wt-json out))))
-           (let ((commit (plist-get (plist-get existing :commit) :id)))
-             (if (equal commit sha) (progn (setq reuse t) nil)
-               (format "Branch %s already exists in the new mount at %s, not at the requested %.12s. It was left as it is; create a new branch from %.12s instead, or delete this copy"
-                       local (if commit (substring commit 0 (min 12 (length commit))) "an unknown commit") sha sha))))))
-     (lambda (next)
-       (if reuse (funcall next)
-         (funcall (my-wt-step root arc (list "log" "-n" "1" "--json" sha))
-                  (lambda (&optional error)
-                    (funcall next (when error
-                                    (format "Revision %.12s is not available in the new mount. Arc mounts do not share local branches or unpublished commits; publish it yourself or start from a published revision. The mount is kept: retry or delete it from the picker. (%s)" sha error)))))))
-     (lambda (next)
-       (funcall (my-wt-step root arc (if reuse (list "checkout" local) (list "checkout" "-b" local sha))) next))
-     ;; Ready only once Arc itself reports the intended branch and commit.
-     (my-wt-step root arc '("info" "--json")
-       (lambda (out)
-         (let ((info (my-wt-json out)))
-           (unless (and (equal (plist-get info :branch) local) (equal (plist-get info :hash) sha))
-             (format "After preparation the mount is on %s at %s, not %s at %.12s; the mount is kept for retry or deletion"
-                     (or (plist-get info :branch) "a detached HEAD") (or (plist-get info :hash) "an unknown commit") local sha)))))
-     (lambda (next)
-       (funcall next (unless (file-directory-p (plist-get copy :directory))
-                       (format "%s does not exist on branch %s" (plist-get copy :relative_path) local)))))))
-
 (defun my-wt-retry (copy &optional callback)
   "Resume a failed creation of COPY without creating another record or directory."
   (unless (equal (plist-get copy :state) "failed") (user-error "Only failed copies can be retried"))
-  (let ((branch (plist-get copy :branch)) (start (plist-get copy :start_revision)) (source (my-wt-original (plist-get copy :project_id))))
+  (let ((branch (plist-get copy :branch)) (start (plist-get copy :start_revision)))
     (my-wt-update (plist-get copy :copy_id) :state "creating" :error nil)
     (my-wt-build (my-wt-copy (plist-get copy :copy_id))
-                 (if (equal (plist-get copy :vcs) "git")
-                     (let ((exists (zerop (car (my-wt-call (plist-get source :vcs_root) "git" "rev-parse" "--verify" "--quiet" (concat "refs/heads/" branch))))))
-                       (list :local branch :exists exists :new (not exists) :start start))
-                   (list :local branch :sha start))
+                 (list :local branch :sha start :remote-ref (plist-get copy :arc_remote_ref))
                  callback)))
 
 ;;; Deletion
@@ -596,84 +544,7 @@ Return (:occupied COPY) when an existing registered copy already has the branch.
      (my-wt-release-step copy)
      (my-wt-step main "git" (list "worktree" "remove" root)))))
 
-(defun my-wt-arc-delete-steps (copy)
-  (let* ((arc (my-wt-arc)) (root (directory-file-name (plist-get copy :vcs_root))) (base (my-wt-base))
-         (source (my-wt-original (plist-get copy :project_id))) info branches)
-    (list
-     (my-wt-step base arc '("mount" "--list" "--json")
-       (lambda (out)
-         (let* ((entries (my-wt-json out)) (mine (my-wt-mount-entry entries root))
-                (original (my-wt-mount-entry entries (plist-get source :vcs_root))))
-           (cond ((not mine) "Arc does not list this mount; it was not removed")
-                 ((not (equal (plist-get mine :store) (plist-get copy :arc_store)))
-                  "The mount's store differs from the recorded store")
-                 ((or (null (plist-get copy :arc_store))
-                      (equal (plist-get mine :store) (plist-get original :store))
-                      (equal (plist-get mine :object-store) (plist-get original :object-store))
-                      (cl-some (lambda (e) (and (not (eq e mine))
-                                                (or (equal (plist-get e :store) (plist-get mine :store))
-                                                    (equal (plist-get e :object-store) (plist-get mine :object-store)))))
-                               entries))
-                  "The store is shared with another mount; refusing --forget")))))
-     (my-wt-step root arc '("info" "--json") (lambda (out) (setq info (my-wt-json out)) nil))
-     (my-wt-step root arc '("status" "--json" "--ignored" "--no-sync-status" "--no-bisect-status")
-       (lambda (out)
-         (let ((status (plist-get (my-wt-json out) :status)))
-           (when (cl-some (lambda (key) (plist-get status key)) '(:untracked :changed :staged :unmerged :ignored))
-             "The copy has changed, untracked or ignored files; remove or commit them first"))))
-     (my-wt-step root arc '("stash" "list")
-       (lambda (out) (unless (string-empty-p (my-wt-clean-error out)) "The copy has stashes; drop or apply them first")))
-     (my-wt-step root arc '("branch" "--list" "--all" "-vv" "--json")
-       (lambda (out) (setq branches (my-wt-json out))
-         (unless (or (null (plist-get info :branch))
-                     (cl-find (plist-get info :branch) branches :key (lambda (b) (and (plist-get b :local) (plist-get b :name))) :test #'equal))
-           "The current branch is missing from Arc's branch list")))
-     (lambda (next)
-       ;; Every local branch, trunk included, must be provably on the server;
-       ;; --forget destroys the store and anything only it holds.
-       (pcase-let ((`(,unsafe . ,behind) (my-wt-arc-unpublished copy info branches)))
-         (if unsafe (funcall next (my-wt-arc-unpublished-error unsafe))
-           (my-wt-chain
-            (mapcar (lambda (entry)
-                      (pcase-let ((`(,name ,commit ,upstream) entry))
-                        (my-wt-step root arc (list "merge-base" commit upstream)
-                          (lambda (out) (unless (equal (string-trim (my-wt-clean-error out)) commit)
-                                          (my-wt-arc-unpublished-error (list name)))))))
-                    behind)
-            next))))
-     (my-wt-release-step copy)
-     ;; Run from outside the mount; a failure is reported, never followed by rm -r.
-     (my-wt-step base arc (list "unmount" "--forget" root)))))
-
-(defun my-wt-arc-unpublished (copy info branches)
-  "Classify local commits of COPY's store from `arc branch --all -vv --json' BRANCHES.
-Return (UNSAFE . BEHIND): UNSAFE lists commits with no evidence of publication;
-BEHIND lists (NAME COMMIT REMOTE-COMMIT), safe only if COMMIT is an ancestor."
-  (let* ((remote (make-hash-table :test #'equal)) (published (make-hash-table :test #'equal)) unsafe behind)
-    (dolist (b branches)
-      (unless (plist-get b :local)
-        (puthash (plist-get b :name) (plist-get (plist-get b :commit) :id) remote)
-        (puthash (plist-get (plist-get b :commit) :id) t published)))
-    (when (my-wt-commit-id-p (plist-get copy :start_revision))
-      (puthash (plist-get copy :start_revision) t published)) ; verified loadable from the server at creation
-    (when (my-wt-commit-id-p (plist-get info :remote_head)) (puthash (plist-get info :remote_head) t published))
-    (dolist (b (cl-remove-if-not (lambda (b) (plist-get b :local)) branches))
-      (let ((commit (plist-get (plist-get b :commit) :id))
-            (upstream (gethash (plist-get b :remote) remote)))
-        (cond ((not (my-wt-commit-id-p commit)) (push (plist-get b :name) unsafe))
-              ((gethash commit published))
-              ((my-wt-commit-id-p upstream) (push (list (plist-get b :name) commit upstream) behind))
-              (t (push (plist-get b :name) unsafe)))))
-    ;; A detached HEAD keeps commits that no branch names.
-    (unless (or (plist-get info :branch) (gethash (plist-get info :hash) published))
-      (push "detached HEAD" unsafe))
-    (cons (nreverse unsafe) (nreverse behind))))
-
-(defun my-wt-arc-unpublished-error (names)
-  (format "Commits on %s may exist only in this copy's store, which --forget would destroy. Publish them, or delete those branches yourself, then retry"
-          (string-join names ", ")))
-
-(defun my-wt-delete (copy &optional callback)
+(defun my-wt-delete (copy &optional callback expected)
   "Delete application-owned COPY after its safety checks; keep its records and chats."
   (when-let* ((blockers (my-wt-delete-blockers copy)))
     (user-error "%s" (string-join blockers "; ")))
@@ -683,15 +554,17 @@ BEHIND lists (NAME COMMIT REMOTE-COMMIT), safe only if COMMIT is an ancestor."
     ;; Releasing kills idle agent buffers, which shuts their adapters down.
     (my-wt-chain
      (cons (lambda (next) (funcall next (car (my-wt-delete-blockers copy t))))
-           (if (equal (plist-get copy :vcs) "git") (my-wt-git-delete-steps copy) (my-wt-arc-delete-steps copy)))
+           (if (equal (plist-get copy :vcs) "git") (my-wt-git-delete-steps copy) (my-wt-arc-delete-steps copy expected)))
      (lambda (error)
        (remhash id my-wt-busy)
        (if error
-           (progn (my-wt-update id :state (if (equal previous "failed") "failed" "ready") :error error)
+           (progn (my-wt-update id :state (cond ((equal previous "failed") "failed")
+                                                   ((and (equal (plist-get copy :vcs) "arc") (not (my-wt-arc-mounted-p copy))) "unavailable")
+                                                   (t "ready")) :error error)
                   (message "Working copy was not deleted: %s" error))
          (my-wt-update id :state "deleted" :error nil)
          (message "Working copy %s deleted; %s" (plist-get copy :tree_name)
-                  (if (equal (plist-get copy :vcs) "git") "its branch and chats were kept" "its chats were kept")))
+                  (if (equal (plist-get copy :vcs) "git") "its branch and chats were kept" "server branches and chats were kept")))
        (when callback (funcall callback error))))))
 
 ;;; Reconciliation
@@ -705,9 +578,11 @@ BEHIND lists (NAME COMMIT REMOTE-COMMIT), safe only if COMMIT is an ancestor."
           ((or "creating" "preparing")
            (my-wt-update id :state "failed" :error "Creation was interrupted; retry or delete"))
           ("deleting"
-           (if (file-exists-p (plist-get copy :vcs_root))
-               (my-wt-update id :state "ready" :error "Deletion was interrupted; nothing was removed by force")
-             (my-wt-update id :state "deleted")))
+           (if (equal (plist-get copy :vcs) "arc")
+               (my-wt-arc-reconcile-deletion copy)
+             (if (file-exists-p (plist-get copy :vcs_root))
+                 (my-wt-update id :state "ready" :error "Deletion was interrupted; nothing was removed by force")
+               (my-wt-update id :state "deleted"))))
           ("ready" (unless (my-wt-usable-p copy)
                      (my-wt-update id :state "unavailable" :error "Directory is missing, unmounted or not the recorded copy")))
           ("unavailable" (when (my-wt-usable-p copy) (my-wt-update id :state "ready" :error nil))))))))
@@ -873,3 +748,5 @@ space alike, so the box has no seams between them."
                (lambda (_name path) (equal (directory-file-name path) (directory-file-name (my-wt-base))))))
 
 (provide 'my-worktrees)
+
+(load (expand-file-name "worktrees-arc.el" (file-name-directory (or load-file-name buffer-file-name))) nil t)

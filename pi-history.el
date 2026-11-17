@@ -45,7 +45,7 @@
         (sqlite-execute my-pi-history-db "PRAGMA journal_mode=WAL")
         (sqlite-execute my-pi-history-db "PRAGMA busy_timeout=50")
         (sqlite-execute my-pi-history-db "PRAGMA foreign_keys=ON")
-        (when (> (caar (sqlite-select my-pi-history-db "PRAGMA user_version")) 2)
+        (when (> (caar (sqlite-select my-pi-history-db "PRAGMA user_version")) 3)
           (error "Pi history database was created by a newer configuration"))
         (sqlite-execute my-pi-history-db "CREATE TABLE IF NOT EXISTS chats (
           session_id TEXT PRIMARY KEY, project_root TEXT NOT NULL, session_file TEXT,
@@ -96,7 +96,7 @@
 
 (defun my-pi-history-migrate (db)
   "Add logical projects and working copies additively, once, in one transaction."
-  (when (or (< (caar (sqlite-select db "PRAGMA user_version")) 2)
+  (when (or (< (caar (sqlite-select db "PRAGMA user_version")) 3)
             (not (member "last_opened_at" (mapcar #'cadr (sqlite-select db "PRAGMA table_info(working_copies)")))))
     ;; A new, empty catalogue has nothing worth backing up.
     (unless (zerop (caar (sqlite-select db "SELECT COUNT(*) FROM chats")))
@@ -129,7 +129,12 @@
                     (my-pi-history--ensure-copy db (car row)))
                   (sqlite-execute db "PRAGMA user_version=2"))
                 (unless (member "last_opened_at" (mapcar #'cadr (sqlite-select db "PRAGMA table_info(working_copies)")))
-                  (sqlite-execute db "ALTER TABLE working_copies ADD COLUMN last_opened_at TEXT")))
+                  (sqlite-execute db "ALTER TABLE working_copies ADD COLUMN last_opened_at TEXT"))
+                (when (< (caar (sqlite-select db "PRAGMA user_version")) 3)
+                  (dolist (column '("source_copy_id" "arc_remote_ref"))
+                    (unless (member column (mapcar #'cadr (sqlite-select db "PRAGMA table_info(working_copies)")))
+                      (sqlite-execute db (format "ALTER TABLE working_copies ADD COLUMN %s TEXT" column))))
+                  (sqlite-execute db "PRAGMA user_version=3")))
               (setq done t))
           (sqlite-error
            (unless (and (< (cl-incf attempt) 100) (string-match-p "locked\\|busy" (error-message-string err)))
