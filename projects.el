@@ -12,6 +12,8 @@
 (require 'tab-line)
 (require 'recentf)
 (require 'tabspaces)
+;; Arc mounts can be temporarily absent; never block startup on a tree-cache prompt.
+(setq treemacs-missing-project-action 'keep)
 (require 'treemacs)
 (require 'treemacs-tab-bar)
 (require 'dashboard)

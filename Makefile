@@ -9,6 +9,16 @@ pi-acp:
 	npm ci --prefix tools/pi-acp --ignore-scripts --no-audit --no-fund
 
 EMACS ?= /Applications/MacPorts/Emacs.app/Contents/MacOS/Emacs
+.PHONY: test-terminal test-terminal-gui
+test-terminal:
+	python3 tests/shell-history-tests.py
+	$(EMACS) -Q --batch -l tests/terminal-tests.el --eval '(ert-run-tests-batch-and-exit "my-shell-")'
+
+test-terminal-gui:
+	test_home=$$(mktemp -d -t emacs-terminal-gui) && \
+	EMACS_TEST_HOME=$$test_home $(EMACS) -Q -l $(CURDIR)/tests/gui-terminal-smoke.el; \
+	status=$$?; cat $$test_home/result 2>/dev/null; exit $$status
+
 .PHONY: test-pi-history test-pi-history-gui
 test-pi-history:
 	$(EMACS) -Q --batch -l tests/pi-history-tests.el -f ert-run-tests-batch-and-exit
