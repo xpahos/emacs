@@ -14,8 +14,9 @@
   "Copy directory -> live VCS info plist (:branch :revision :error).")
 (defvar my-wt-generations (make-hash-table :test #'equal))
 (defvar my-wt-change-hook nil "Run after copy records or branch labels change.")
+(defvar my-wt-deleted-hook nil "Functions receiving a copy after confirmed deletion.")
 
-(defun my-wt-base () (expand-file-name "worktree/" user-emacs-directory))
+(defun my-wt-base () (my-wt-dir (expand-file-name "worktree/" user-emacs-directory)))
 (defun my-wt-arc () (if (boundp 'arcit-arc-executable) arcit-arc-executable "arc"))
 (defun my-wt-dir (directory) (file-name-as-directory (file-truename directory)))
 
@@ -67,13 +68,15 @@
     result))
 
 (defun my-wt-update (id &rest fields)
-  (my-wt-write
-   (lambda (db)
-     (while fields
-       (let ((key (intern (substring (symbol-name (pop fields)) 1))) (value (pop fields)))
-         (unless (memq key (cddr my-wt-columns)) (error "Invalid copy field %s" key))
-         (sqlite-execute db (format "UPDATE working_copies SET %s=?,updated_at=? WHERE copy_id=?" key)
-                         (list value (my-pi-history-now) id)))))))
+  (let ((deleted (equal (plist-get fields :state) "deleted")))
+    (my-wt-write
+     (lambda (db)
+       (while fields
+         (let ((key (intern (substring (symbol-name (pop fields)) 1))) (value (pop fields)))
+           (unless (memq key (cddr my-wt-columns)) (error "Invalid copy field %s" key))
+           (sqlite-execute db (format "UPDATE working_copies SET %s=?,updated_at=? WHERE copy_id=?" key)
+                           (list value (my-pi-history-now) id))))))
+    (when deleted (run-hook-with-args 'my-wt-deleted-hook (my-wt-copy id)))))
 
 (defun my-wt-set-active (copy &optional restoring)
   "Select COPY, recording access unless RESTORING a saved session."
@@ -107,7 +110,39 @@
              (sqlite-execute db "UPDATE working_copies SET vcs=?,vcs_root=?,relative_path=? WHERE directory=? AND vcs_root IS NULL"
                              (list (car vcs) (cdr vcs) (file-relative-name directory (cdr vcs)) directory)))))
         (setq copy (my-wt-copy-at directory))))
+    (my-wt-record-git-identity copy)
     copy))
+
+(defun my-wt-directory-identity (directory)
+  (when-let* ((attributes (file-attributes directory)))
+    (when (eq (car attributes) t)
+      (prin1-to-string (list (file-attribute-device-number attributes)
+                            (file-attribute-inode-number attributes))))))
+
+(defun my-wt-git-identity (copy)
+  "Recorded Git administrative location; absence is not evidence of deletion."
+  (let ((db (my-pi-history-open)))
+    (sqlite-execute db "CREATE TABLE IF NOT EXISTS working_copy_git_identity
+      (copy_id TEXT PRIMARY KEY, git_dir TEXT NOT NULL, common_dir TEXT NOT NULL, common_identity TEXT NOT NULL)")
+    (car (sqlite-select db "SELECT git_dir,common_dir,common_identity FROM working_copy_git_identity WHERE copy_id=?"
+                        (list (plist-get copy :copy_id))))))
+
+(defun my-wt-record-git-identity (copy)
+  "Capture identity while COPY is available; never replace it with a different repository."
+  (when (and (equal (plist-get copy :role) "copy") (equal (plist-get copy :vcs) "git")
+             (not (my-wt-git-identity copy)) (my-wt-usable-p copy))
+    (pcase (my-wt-call (plist-get copy :vcs_root) "git" "rev-parse" "--path-format=absolute" "--git-dir" "--git-common-dir")
+      (`(0 . ,out)
+       (let ((paths (split-string (string-trim out) "\n")))
+         (when (= (length paths) 2)
+           (let* ((git-dir (file-truename (car paths)))
+                  (common (file-truename (cadr paths)))
+                  (identity (my-wt-directory-identity common)))
+             (when identity
+               (my-wt-write
+                (lambda (db)
+                  (sqlite-execute db "INSERT OR IGNORE INTO working_copy_git_identity VALUES (?,?,?,?)"
+                                  (list (plist-get copy :copy_id) git-dir common identity))))))))))))
 
 (defun my-wt-tab-copy (&optional tab)
   (my-wt-copy-at (alist-get 'my-project-root (or tab (tab-bar--current-tab)))))
@@ -427,6 +462,7 @@ Return (:occupied COPY) when an existing registered copy already has the branch.
          (my-wt-update id :state "ready" :error nil))
        (let ((copy (my-wt-copy id)))
          (if error (message "Working copy %s failed: %s" (plist-get copy :tree_name) error)
+           (my-wt-record-git-identity copy)
            (my-wt-refresh-branch copy))
          (when callback (funcall callback copy)))))))
 
@@ -462,12 +498,38 @@ Return (:occupied COPY) when an existing registered copy already has the branch.
 
 ;;; Deletion
 
+(defun my-wt-forget-tree (copy)
+  "Forget confirmed deleted COPY in every cached tree scope, including old child frames."
+  (when (and (equal (plist-get copy :role) "copy")
+             (equal (plist-get copy :state) "deleted")
+             (plist-get copy :vcs_root)
+             (not (file-exists-p (plist-get copy :vcs_root))))
+    (let ((root (plist-get copy :vcs_root)) changed)
+      (dolist (workspace (treemacs-workspaces))
+        (let* ((projects (treemacs-workspace->projects workspace))
+               (kept (cl-remove-if
+                      (lambda (project)
+                        (let ((path (treemacs-project->path project)))
+                          (and path (not (file-remote-p path))
+                               ;; file-in-directory-p returns nil for removed directories.
+                               (string-prefix-p (my-wt-dir root) (my-wt-dir path))))) projects)))
+          (unless (equal projects kept)
+            (setf (treemacs-workspace->projects workspace) kept)
+            (setq changed t))))
+      (when changed (treemacs--persist)))))
+
+(add-hook 'my-wt-deleted-hook #'my-wt-forget-tree)
+
 (defun my-wt-copy-buffers (copy)
   (let ((root (plist-get copy :vcs_root)))
     ;; Internal (space-named) buffers include this module's own process buffers.
-    (cl-remove-if-not (lambda (b) (when-let* ((dir (buffer-local-value 'default-directory b)))
-                                    (and (not (string-prefix-p " " (buffer-name b)))
-                                         (not (file-remote-p dir)) (file-in-directory-p dir root))))
+    (cl-remove-if-not (lambda (b)
+                        (if (and (boundp 'my-shell-context-id)
+                                 (buffer-local-value 'my-shell-context-id b))
+                            (equal (buffer-local-value 'my-shell-copy-id b) (plist-get copy :copy_id))
+                          (when-let* ((dir (buffer-local-value 'default-directory b)))
+                            (and (not (string-prefix-p " " (buffer-name b)))
+                                 (not (file-remote-p dir)) (file-in-directory-p dir root)))))
                       (buffer-list))))
 
 (defun my-wt-delete-blockers (copy &optional recheck)
@@ -571,23 +633,45 @@ Return (:occupied COPY) when an existing registered copy already has the branch.
 
 ;;; Reconciliation
 
+(defun my-wt-git-deleted-externally-p (copy)
+  "Confirm removal of the recorded Git admin directory in the same repository."
+  (when (and (equal (plist-get copy :role) "copy")
+             (equal (plist-get copy :vcs) "git")
+             (not (file-exists-p (plist-get copy :vcs_root))))
+    (let ((original (my-wt-original (plist-get copy :project_id)))
+          (identity (my-wt-git-identity copy)))
+      (when (and identity (my-wt-usable-p original)
+                 (equal (nth 2 identity) (my-wt-directory-identity (nth 1 identity)))
+                 (not (file-exists-p (car identity))))
+        (pcase (my-wt-call (plist-get original :vcs_root) "git" "worktree" "list" "--porcelain")
+          (`(0 . ,out)
+           (not (member (concat "worktree " (directory-file-name (plist-get copy :vcs_root)))
+                        (split-string out "\n")))))))))
+
 (defun my-wt-reconcile (project-id)
   "Bring records of PROJECT-ID in line with the filesystem after a restart."
   (dolist (copy (my-wt-copies project-id))
     (let ((id (plist-get copy :copy_id)) (state (plist-get copy :state)))
       (unless (gethash id my-wt-busy)
+        (my-wt-record-git-identity copy)
         (pcase state
           ((or "creating" "preparing")
            (my-wt-update id :state "failed" :error "Creation was interrupted; retry or delete"))
           ("deleting"
            (if (equal (plist-get copy :vcs) "arc")
                (my-wt-arc-reconcile-deletion copy)
-             (if (file-exists-p (plist-get copy :vcs_root))
-                 (my-wt-update id :state "ready" :error "Deletion was interrupted; nothing was removed by force")
-               (my-wt-update id :state "deleted"))))
-          ("ready" (unless (my-wt-usable-p copy)
-                     (my-wt-update id :state "unavailable" :error "Directory is missing, unmounted or not the recorded copy")))
-          ("unavailable" (when (my-wt-usable-p copy) (my-wt-update id :state "ready" :error nil))))))))
+             (cond ((my-wt-git-deleted-externally-p copy) (my-wt-update id :state "deleted" :error nil))
+                   ((and (file-accessible-directory-p (plist-get copy :directory))
+                         (file-exists-p (expand-file-name ".git" (plist-get copy :vcs_root))))
+                    (my-wt-update id :state "ready" :error "Deletion was interrupted; nothing was removed by force"))
+                   (t (my-wt-update id :state "unavailable" :error "Deletion was interrupted; removal is not confirmed")))))
+          ("deleted" (run-hook-with-args 'my-wt-deleted-hook copy))
+          ("ready" (if (my-wt-git-deleted-externally-p copy)
+                       (my-wt-update id :state "deleted" :error nil)
+                     (unless (my-wt-usable-p copy)
+                       (my-wt-update id :state "unavailable" :error "Directory is missing, unmounted or not the recorded copy"))))
+          ("unavailable" (cond ((my-wt-usable-p copy) (my-wt-update id :state "ready" :error nil))
+                               ((my-wt-git-deleted-externally-p copy) (my-wt-update id :state "deleted" :error nil)))))))))
 
 ;;; Editor state per copy
 
@@ -750,5 +834,13 @@ space alike, so the box has no seams between them."
                (lambda (_name path) (equal (directory-file-name path) (directory-file-name (my-wt-base))))))
 
 (provide 'my-worktrees)
+
+(defun my-wt-forget-deleted-trees (&rest _)
+  "Clean old scopes after Treemacs lazily restores its tree cache."
+  (dolist (copy (my-wt--select "WHERE role='copy' AND state='deleted'" nil))
+    (my-wt-forget-tree copy)))
+
+(advice-add 'treemacs--restore :after #'my-wt-forget-deleted-trees)
+(my-wt-forget-deleted-trees)
 
 (load (expand-file-name "worktrees-arc.el" (file-name-directory (or load-file-name buffer-file-name))) nil t)

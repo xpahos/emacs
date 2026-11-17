@@ -61,13 +61,14 @@
   "Show references from FETCHER over the source window described by ALIST."
   (let* ((xref-buffer-name "*References*")
          (display-buffer-alist
-          (cons '("\\`\\*References\\*\\'"
+          (cons `("\\`\\*References\\*\\'"
                   (display-buffer-in-child-frame)
                   (child-frame-parameters
                    (width . 0.75) (height . 0.35) (left . 0.5) (top . 0.3)
                    (undecorated . t) (minibuffer . nil)
                    (menu-bar-lines . 0) (tool-bar-lines . 0) (tab-bar-lines . 0)
-                   (internal-border-width . 2) (vertical-scroll-bars . right)))
+                   (internal-border-width . 2)
+                   (vertical-scroll-bars . ,(unless (eq system-type 'darwin) 'right))))
                 display-buffer-alist))
          (buffer (xref--show-xref-buffer fetcher alist)))
     (with-current-buffer buffer
@@ -107,13 +108,14 @@
                 (with-selected-frame parent
                   (display-buffer-in-child-frame
                    buffer
-                   (cons '(child-frame-parameters
+                   (cons `(child-frame-parameters
                            (width . 0.75) (height . 0.35) (left . 0.5) (top . 0.3)
                            (undecorated . t) (minibuffer . nil)
                            (share-child-frame . eglot-log)
                            (menu-bar-lines . 0) (tool-bar-lines . 0) (tab-bar-lines . 0)
                            (tab-bar-lines-keep-state . t)
-                           (internal-border-width . 2) (vertical-scroll-bars . right))
+                           (internal-border-width . 2)
+                           (vertical-scroll-bars . ,(unless (eq system-type 'darwin) 'right)))
                          alist))))))
       (with-current-buffer buffer
         (use-local-map (copy-keymap (current-local-map)))

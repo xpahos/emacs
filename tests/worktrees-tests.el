@@ -77,6 +77,30 @@
 
 ;;; Registry and migration
 
+(ert-deftest my-wt-missing-tree-does-not-block-startup ()
+  (let* ((path (make-temp-name "/private/tmp/missing-worktree-"))
+         (iter (treemacs-iter->create! :list (list "* Tab old" "** project" (concat " - path :: " path)))))
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (&rest _) (ert-fail "Startup prompted for an unavailable tree"))))
+      (let ((workspaces (cadr (treemacs--read-workspaces iter))))
+        (should (= (length workspaces) 1))
+        (should (equal (treemacs-project->path (car (treemacs-workspace->projects (car workspaces)))) path))))))
+
+(ert-deftest my-wt-deleted-tree-is-forgotten-in-all-scopes ()
+  (my-wt-test
+   (let* ((gone (expand-file-name "gone/" tmp))
+          (unmounted (expand-file-name "unmounted/" tmp))
+          (deleted-project (treemacs-project->create! :name "deleted" :path (expand-file-name "cloud/compute/go" gone)))
+          (offline-project (treemacs-project->create! :name "offline" :path (directory-file-name unmounted)))
+          (treemacs--workspaces
+           (list (treemacs-workspace->create! :name "old" :projects (list deleted-project offline-project))
+                 (treemacs-workspace->create! :name "other" :projects (list deleted-project)))))
+     (my-wt-forget-tree (list :role "copy" :state "unavailable" :vcs_root gone))
+     (should (= (length (treemacs-workspace->projects (car treemacs--workspaces))) 2))
+     (my-wt-forget-tree (list :role "copy" :state "deleted" :vcs_root gone))
+     (should (equal (treemacs-workspace->projects (car treemacs--workspaces)) (list offline-project)))
+     (should-not (treemacs-workspace->projects (cadr treemacs--workspaces))))))
+
 (defun my-wt-test-v1-db (root other)
   "Write a catalogue in the previous (version 1) schema with real-looking state."
   (make-directory (file-name-directory (my-pi-history-path)) t)

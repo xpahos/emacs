@@ -7,7 +7,7 @@
                          ("melpa" . "https://melpa.org/packages/")))
 (package-initialize)
 (package-refresh-contents)
-(dolist (package '(treemacs treemacs-tab-bar tabspaces dashboard magit diff-hl))
+(dolist (package '(treemacs treemacs-tab-bar tabspaces dashboard magit diff-hl ghostel))
   (unless (package-installed-p package)
     (package-install package)))
 

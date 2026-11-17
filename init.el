@@ -2,6 +2,11 @@
 
 (tool-bar-mode -1)
 
+;; Work around the macOS 31.1 ns_judge_scroll_bars / CALayerArray abort.
+(when (eq system-type 'darwin)
+  (scroll-bar-mode -1)
+  (horizontal-scroll-bar-mode -1))
+
 ;; Use the bundled Modus theme with a muted, paper-like palette.
 (require-theme 'modus-themes)
 (setq modus-themes-bold-constructs nil
@@ -79,7 +84,8 @@
   (load (expand-file-name "overview.el" config-directory) nil t)
   (load (expand-file-name "modified-state.el" config-directory) nil t)
   (load (expand-file-name "markdown-view.el" config-directory) nil t)
-  (load (expand-file-name "pi-panel.el" config-directory) nil t))
+  (load (expand-file-name "pi-panel.el" config-directory) nil t)
+  (load (expand-file-name "terminal.el" config-directory) nil t))
 
 ;; Separate edges leave the current tab open at the bottom.
 (dolist (face '(tab-bar tab-line tab-line-active tab-line-inactive
