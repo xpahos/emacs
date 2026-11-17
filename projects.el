@@ -19,6 +19,17 @@
 
 (define-key dired-mode-map [mouse-2] #'dired-mouse-find-file)
 
+(defun my-treemacs-hl-line-range ()
+  "Highlight tree entries, leaving project roots without a background."
+  (let ((start (line-beginning-position)))
+    (cons start (if (eq (get-text-property start :depth) 0)
+                    start
+                  (line-beginning-position 2)))))
+
+(add-hook 'treemacs-mode-hook
+          (lambda ()
+            (setq-local hl-line-range-function #'my-treemacs-hl-line-range)))
+
 (defun my-project-hide-directory-windows (frame)
   "Hide central directory panes in FRAME when a project file is visible."
   (with-selected-frame frame

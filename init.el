@@ -11,18 +11,19 @@
        ;; GoLand Dark syntax roles, darkened and muted for stone paper.
        '((comment "#3c3f39")
          (builtin "#482818")
-         (constant "#4b203c")
+         (constant "#24534e")
          (docstring "#1d361c")
          (fnname "#14334f")
          (fnname-call "#402e18")
          (keyword "#482818")
          (preprocessor "#482818")
-         (property "#4b203c")
+         (property "#24534e")
          (string "#1d361c")
          (type "#153538")
          (number "#0f353b")
          (variable "#29313d")
          (variable-use "#29313d")
+         (accent-0 "#24534e")
          (fg-link blue)
          (underline-link blue)
          (fg-link-visited magenta)
@@ -42,7 +43,7 @@
           (green "#19380f")
           (yellow "#4f2c0e")
           (blue "#173568")
-          (magenta "#52205b")
+          (magenta "#24534e")
           (cyan "#083b3a")))))
 (mapc #'disable-theme custom-enabled-themes)
 (load-theme 'modus-operandi t)
@@ -52,6 +53,16 @@
                     :weight 'semi-bold)
 (set-face-attribute 'fixed-pitch nil :family "JetBrains Mono NL"
                     :weight 'semi-bold)
+
+;; Keep text readable on the darker selection and heading backgrounds.
+(dolist (face '(region hl-line highlight treemacs-hl-line-face
+                modus-themes-completion-selected))
+  (custom-set-faces
+   `(,face ((t (:background "#1c4642" :foreground "#dbe5df"))))))
+(dolist (face '(header-line header-line-active header-line-inactive
+                mode-line mode-line-active mode-line-inactive my-wt-header-frame))
+  (custom-set-faces
+   `(,face ((t (:background "#898880" :foreground "#20211e"))))))
 
 (require 'package)
 (let ((config-directory (file-name-directory (or load-file-name buffer-file-name))))
@@ -76,7 +87,7 @@
                          tab-line-tab-inactive-alternate)))
         (current (memq face '(tab-bar-tab tab-line-tab tab-line-tab-current))))
     (custom-set-faces
-     `(,face ((t (:box nil
+     `(,face ((t (:background "#898880" :foreground "#20211e" :box nil
                   :overline ,(and tab "#73726b")
                   :underline ,(unless current
                                 '(:color "#73726b" :position t)))))))))
