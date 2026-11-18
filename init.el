@@ -77,6 +77,7 @@
 (let ((config-directory (file-name-directory (or load-file-name buffer-file-name))))
   (setq package-user-dir (expand-file-name "elpa" config-directory))
   (package-initialize)
+  (load (expand-file-name "keyboard.el" config-directory) nil t)
   (load (expand-file-name "projects.el" config-directory) nil t)
   (load (expand-file-name "navigation.el" config-directory) nil t)
   (load (expand-file-name "arcadia.el" config-directory) nil t)
