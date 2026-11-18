@@ -8,6 +8,8 @@
 (require 'color)
 (require 'subr-x)
 (require 'vc-git)
+(require 'my-popup-style (expand-file-name "popup-style.el"
+                                          (file-name-directory load-file-name)))
 
 (declare-function vc-arc-root "vc-arc" (file))
 (defvar arcit-arc-executable)
@@ -282,7 +284,7 @@ LEFT and TOP are the tooltip's screen position.")
 (defun line-blame--target-at-mouse ()
   "Return the annotation target under the pointer, or nil."
   (pcase-let ((`(,frame ,x . ,y) (mouse-pixel-position)))
-    (when (and (frame-live-p frame) (integerp x) (integerp y))
+    (when (and (frame-live-p frame) (natnump x) (natnump y))
       (let* ((posn (posn-at-x-y x y frame))
              (window (posn-window posn)))
         (when (and (windowp window) (null (posn-area posn)) (posn-point posn)
@@ -318,7 +320,7 @@ LEFT and TOP are the tooltip's screen position.")
     (setq line-blame--delay-timer nil))
   (when line-blame--shown
     (setq line-blame--shown nil)
-    (x-hide-tip)))
+    (posframe-hide " *Blame details*")))
 
 (defun line-blame--poll ()
   "Track the annotation under the pointer; restart the delay only when it changes."
@@ -375,12 +377,11 @@ LEFT and TOP are the tooltip's screen position.")
               (buffer (window-buffer (car target)))
               (key (cons (buffer-local-value 'line-blame--root buffer) (nth 2 entry))))
     (if-let* ((message (or (nth 4 entry) (gethash key line-blame--messages))))
-        (progn
-          (x-show-tip (propertize (line-blame--details entry message) 'face 'tooltip)
-                      (window-frame (car target))
-                      `((left . ,(nth 2 target)) (top . ,(nthcdr 3 target)))
-                      ;; Stay up while hovered; leaving hides it.
-                      86400)
+        (let ((edges (frame-edges (window-frame (car target)) 'inner-edges)))
+          (my-popup-show " *Blame details*" (line-blame--details entry message)
+                         (car target)
+                         (cons (- (nth 2 target) (nth 0 edges))
+                               (- (nthcdr 3 target) (nth 1 edges))))
           (setq line-blame--shown target))
       (line-blame--fetch key))))
 

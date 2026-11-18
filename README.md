@@ -2,6 +2,9 @@
 
 Emacs with a JetBrains flavor and tight pi integration, configured to replace GoLand.
 
+Hover documentation, blame details, References and Messages/Eglot popups share
+colors, a 2 px border and 12 px side padding defined in `popup-style.el`.
+
 ## Keyboard shortcuts
 
 `C-` means Ctrl, `M-` means Alt/Option, and `s-` means Command on macOS.
@@ -31,7 +34,9 @@ Useful package defaults are listed separately in the shell table.
 | `C-c w` | Open the current project's working copy / worktree picker. |
 | `C-c v` | Show repository status: Arcit for Arc, standard `vc-dir` for Git and other backends. |
 | `C-c b` | Toggle inline blame annotations for the current file. |
+| Hold `Command` and hover over a symbol | Show its signature/type and documentation after a short delay (requires a connected language server). Release Command or leave the symbol to hide. |
 | `Command` + left-click on a symbol | Find references to the symbol in code and open the `References` popup. |
+| `C-c r` | Rename the symbol at point through Eglot (requires a connected language server); enter the new name and press Enter. |
 | `C-c a` | Open/focus the Pi panel on the right; hide it when invoked from the panel. |
 | `C-c t` | Open/focus the shell across the bottom of the frame; hide it without stopping the process when invoked from the shell. |
 | `C-u C-c t` | Select a named shell session or create a new one. |

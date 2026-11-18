@@ -23,22 +23,39 @@
 (defun lb-step (label)
   (write-region (format "%s\n" label) nil (expand-file-name "progress" user-emacs-directory) t 'silent))
 
-(defvar lb-gui-tips 0 "Calls to the real `x-show-tip'.")
-(advice-add 'x-show-tip :after (lambda (&rest _) (cl-incf lb-gui-tips)))
+(defvar lb-gui-tips 0 "Blame tooltips shown by the shared popup helper.")
+(defvar lb-gui-pointer nil "Controlled pointer coordinates for the GUI checks.")
+(advice-add 'mouse-pixel-position :override (lambda () lb-gui-pointer))
+
+(defun lb-gui-move-pointer (frame x y)
+  "Move the test pointer without competing with the user's desktop mouse."
+  (setq lb-gui-pointer (cons frame (cons x y))))
+
+(advice-add 'my-popup-show :after
+            (lambda (buffer &rest _)
+              (when (equal buffer " *Blame details*") (cl-incf lb-gui-tips))))
 
 (defun lb-gui-warp (window col pos)
-  "Move the real pointer to column COL of the text area, on the screen row of POS.
+  "Move the test pointer to column COL of the text area, on the screen row of POS.
 POS may instead be (Y), a row's window-relative pixel position."
   (let ((edges (window-inside-pixel-edges window))
         (y (if (consp pos) (car pos) (cdr (posn-x-y (posn-at-point pos window))))))
-    (set-mouse-pixel-position (window-frame window)
+    (lb-gui-move-pointer (window-frame window)
                               (+ (nth 0 edges) (* col (frame-char-width))
                                  (/ (frame-char-width) 2))
                               (+ (nth 1 edges) y (/ (frame-char-height) 2)))))
 
 (defun lb-gui-settle (seconds)
   (let ((end (+ (float-time) seconds)))
-    (while (< (float-time) end) (sit-for 0.02))))
+    ;; Child-frame input can make `sit-for' return without running hover timers.
+    (while (< (float-time) end) (accept-process-output nil 0.02))))
+
+(defun lb-gui-await (predicate)
+  "Wait for a child-frame transition, with a bounded deadline."
+  (let ((end (+ (float-time) 3)))
+    (while (and (not (funcall predicate)) (< (float-time) end))
+      (accept-process-output nil 0.02)))
+  (should (funcall predicate)))
 
 (defun lb-gui-x (pos &optional window)
   (car (posn-x-y (posn-at-point pos window))))
@@ -134,6 +151,14 @@ POS may instead be (Y), a row's window-relative pixel position."
                 (lb-gui-settle 0.25)
                 (should (eq (cadr line-blame--shown) (funcall prefix-of 1)))
                 (should (= lb-gui-tips (1+ tips)))
+                (let ((tip (buffer-local-value 'posframe--frame
+                                                (get-buffer " *Blame details*"))))
+                  (should (eq (frame-parent tip) (window-frame sel)))
+                  (should (= (frame-parameter tip 'child-frame-border-width) 2))
+                  (should (= (frame-parameter tip 'left-fringe) 12))
+                  (should (= (frame-parameter tip 'right-fringe) 12))
+                  (should (equal (frame-parameter tip 'background-color)
+                                 (face-background 'tooltip nil t))))
                 (should (eq (selected-window) sel))
                 (should (= (point) 1)))
               ;; Code, line numbers and both separators are not targets.
@@ -145,10 +170,10 @@ POS may instead be (Y), a row's window-relative pixel position."
                 (should-not line-blame--shown))
               ;; Moving onto the tooltip hides it.
               (lb-gui-warp window (+ bcol 4) 1)
-              (lb-gui-settle 0.5)
+              (lb-gui-await (lambda () line-blame--shown))
               (should line-blame--shown)
               (let ((inner (frame-edges nil 'inner-edges)))
-                (set-mouse-pixel-position (selected-frame) (+ 4 (- (nth 2 line-blame--shown) (nth 0 inner)))
+                (lb-gui-move-pointer (selected-frame) (+ 4 (- (nth 2 line-blame--shown) (nth 0 inner)))
                                           (+ 4 (- (nthcdr 3 line-blame--shown) (nth 1 inner)))))
               (lb-gui-settle 0.1)
               (should-not line-blame--shown)
@@ -174,10 +199,12 @@ POS may instead be (Y), a row's window-relative pixel position."
               (lb-gui-settle 0.2)
               (should-not line-blame--shown)
               (lb-gui-settle 0.4)
+              (lb-gui-await (lambda () (eq (cadr line-blame--shown) (funcall prefix-of line3))))
               (should (eq (cadr line-blame--shown) (funcall prefix-of line3)))
               ;; Scrolling under a resting pointer drops the old line's tip at once.
+              (lb-step "hover-scroll")
               (lb-gui-warp window (+ bcol 4) 1)
-              (lb-gui-settle 0.5)
+              (lb-gui-await (lambda () (eq (cadr line-blame--shown) (funcall prefix-of 1))))
               (should (eq (cadr line-blame--shown) (funcall prefix-of 1)))
               (set-window-start window line2)
               (redisplay t)
@@ -187,16 +214,18 @@ POS may instead be (Y), a row's window-relative pixel position."
               (set-window-start window 1)
               (redisplay t)
               ;; Horizontal scrolling keeps the annotation hoverable.
+              (lb-step "hover-hscroll")
               (let ((row (list (cdr (posn-x-y (posn-at-point 1 window))))))
                 (setq truncate-lines t)
                 (set-window-hscroll window 20)
                 (redisplay t)
                 (lb-gui-warp window (+ bcol 4) row))
-              (lb-gui-settle 0.5)
+              (lb-gui-await (lambda () (eq (cadr line-blame--shown) (funcall prefix-of 1))))
               (should (eq (cadr line-blame--shown) (funcall prefix-of 1)))
               (set-window-hscroll window 0)
               (setq truncate-lines nil)
               ;; Each window is its own target.
+              (lb-step "hover-second-window")
               (let ((second (split-window-right)))
                 (set-window-start second 1)
                 (redisplay t)
@@ -204,7 +233,7 @@ POS may instead be (Y), a row's window-relative pixel position."
                 (lb-gui-settle 0.1)
                 (should (eq (car line-blame--target) second))
                 (should-not line-blame--shown)
-                (lb-gui-settle 0.5)
+                (lb-gui-await (lambda () (eq (car line-blame--shown) second)))
                 (should (eq (car line-blame--shown) second))
                 (delete-window second)
                 (redisplay t))
@@ -252,7 +281,9 @@ POS may instead be (Y), a row's window-relative pixel position."
             ;; Arc details come from blame itself: shown after the delay, no fetch.
             (let ((tips lb-gui-tips))
               (lb-gui-warp (selected-window) (+ (/ base cw) 4) (point-min))
-              (lb-gui-settle 0.6)
+              (lb-gui-await
+               (lambda () (eq (cadr line-blame--shown)
+                               (get-char-property (point-min) 'line-prefix))))
               (should (eq (cadr line-blame--shown) (get-char-property (point-min) 'line-prefix)))
               (should (= lb-gui-tips (1+ tips)))
               (should (zerop (hash-table-count line-blame--fetching))))

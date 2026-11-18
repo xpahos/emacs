@@ -321,8 +321,16 @@ esac
 ;;; Shading and hover
 
 (defvar lb-mouse nil "Target the stubbed pointer is over.")
-(defvar lb-tips nil "Texts passed to the stubbed `x-show-tip', newest first.")
+(defvar lb-tips nil "Texts passed to the stubbed `posframe-show', newest first.")
 (defvar lb-hides 0)
+
+(ert-deftest line-blame-hover-ignores-pointer-outside-frame ()
+  (dolist (xy '((-1 . 20) (20 . -1) (nil . 20)))
+    (cl-letf (((symbol-function 'mouse-pixel-position)
+               (lambda () (cons (selected-frame) xy)))
+              ((symbol-function 'posn-at-x-y)
+               (lambda (&rest _) (ert-fail "Invalid coordinates reached posn-at-x-y"))))
+      (should-not (line-blame--target-at-mouse)))))
 
 (defun lb-two-commit-repo ()
   "Repository whose a.txt has lines from two commits on different days."
@@ -347,9 +355,11 @@ esac
   `(let ((dir (lb-two-commit-repo)) (lb-mouse nil) (lb-tips nil) (lb-hides 0))
      (clrhash line-blame--messages)
      (cl-letf (((symbol-function 'line-blame--target-at-mouse) (lambda () lb-mouse))
-               ((symbol-function 'x-show-tip)
-                (lambda (text &rest _) (push (substring-no-properties text) lb-tips)))
-               ((symbol-function 'x-hide-tip) (lambda () (cl-incf lb-hides))))
+               ((symbol-function 'posframe-show)
+                (lambda (_buffer &rest args)
+                  (push (substring-no-properties (plist-get args :string)) lb-tips)))
+               ((symbol-function 'frame-edges) (lambda (&rest _) '(0 0 1000 800)))
+               ((symbol-function 'posframe-hide) (lambda (_) (cl-incf lb-hides))))
        (lb-with-file (expand-file-name "a.txt" dir)
          (set-window-buffer (selected-window) (current-buffer))
          (line-blame-mode 1)
