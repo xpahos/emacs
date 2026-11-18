@@ -236,7 +236,7 @@
            (let ((error (my-wt-arc-store-error copy entries)))
              (cond (error (funcall next error))
                    ((equal (plist-get mine :status) "mounted") (funcall next))
-                   ((equal (plist-get mine :status) "unmounted") (funcall (my-wt-step base arc (list "mount" root)) next))
+                   ((equal (plist-get mine :status) "unmounted") (funcall (my-wt-step base arc (list "mount" root "--allow-other")) next))
                    (t (funcall next "The existing mount is broken")))))
           (t (setq new t)
              (let ((store (or (plist-get copy :arc_store)
@@ -245,7 +245,7 @@
                (my-wt-update id :arc_repository tenant :arc_store store :arc_object_store objects)
                (make-directory (file-name-directory store) t)
                (funcall (my-wt-step base arc (list "worktree" "add" root "--" "--repository" tenant
-                                                  "--store" store "--object-store" objects)) next))))))
+                                                  "--store" store "--object-store" objects "--allow-other")) next))))))
      (my-wt-step base arc '("worktree" "list" "--json" "--no-status")
        (lambda (out)
          (setq entries (my-wt-json out))

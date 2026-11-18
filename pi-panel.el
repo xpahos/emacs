@@ -6,6 +6,7 @@
 
 (defvar my-pi-buffers (make-hash-table :test #'equal))
 (defvar-local my-pi-root nil)
+(defvar-local my-pi-offline-root nil)
 (defvar-local my-pi-width 0.33)
 (defvar-local my-pi-return-window nil)
 
@@ -311,29 +312,56 @@ an empty branch with its commit."
                 (now (my-wt-context-now copy)))
       (my-pi-history-update id :branch (or (plist-get now :branch) "") :revision (plist-get now :revision)))))
 
+(defface my-pi-offline-label
+  '((t (:foreground "#19380f" :weight semi-bold :inverse-video t)))
+  "Green metadata badges with the same inversion as Me/Pi labels."
+  :group 'agent-shell)
+
 (defun my-pi-show-offline (chat reason)
   "Show CHAT's indexed transcript read-only; no agent starts and no directory is created."
-  (let ((buffer (get-buffer-create (format "*Pi transcript: %s*" (plist-get chat :title)))))
-    (with-current-buffer buffer
-      (special-mode)
-      (setq-local default-directory user-emacs-directory my-pi-root nil tab-line-format nil
-                  header-line-format (concat " Offline transcript · " reason))
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (insert (propertize (or (plist-get chat :title) "Chat") 'face 'bold) "\n"
-                (propertize (format "%s\nWorking copy: %s%s" reason (plist-get chat :project_root)
-                                    (if (member (plist-get chat :branch) '(nil "")) ""
-                                      (format " · branch %s" (plist-get chat :branch))))
-                            'face 'shadow) "\n\n")
-        (dolist (row (sqlite-select (my-pi-history-open)
-                      "SELECT role,body FROM messages WHERE session_id=? AND message_id<>'' ORDER BY CAST(ordinal AS INTEGER)"
-                      (list (plist-get chat :id))))
-          (insert (propertize (if (equal (car row) "user") "You" "Pi") 'face 'bold) "\n" (cadr row) "\n\n"))
-        (goto-char (point-min))))
+  (let ((buffer (get-buffer-create (format "*Pi transcript: %s*" (plist-get chat :title))))
+        (root (my-pi-history-root (plist-get chat :project_root)))
+        (new-root (or (alist-get 'my-project-root (tab-bar--current-tab))
+                      (plist-get chat :project_root))))
     (select-window
      (display-buffer-in-side-window
       buffer `((side . right) (slot . 0) (window-width . ,my-pi-width)
                (window-parameters . ((my-pi-panel . t) (no-other-window . t) (no-delete-other-windows . t))))))
+    (with-current-buffer buffer
+      (special-mode)
+      (visual-line-mode 1)
+      (setq-local default-directory user-emacs-directory my-pi-root nil tab-line-format nil
+                  my-pi-offline-root root
+                  header-line-format
+                  (concat
+                   (my-pi-header-button " Chats · Offline ▾ " "Search this project's chats"
+                                        (lambda () (interactive) (my-pi-history-show root)))
+                   (my-pi-header-button " + " "New chat in the current working copy"
+                                        (lambda () (interactive) (my-pi-new-chat new-root)))))
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert "\n" (agent-shell-chat--label reason 'user) "\n\n")
+        (dolist (field `(("Chat Name" . ,(or (plist-get chat :title) "Chat"))
+                         ("Branch" . ,(pcase (plist-get chat :branch)
+                                        ('nil "Unknown") ("" "Detached HEAD") (branch branch)))
+                         ("Path" . ,root)))
+          (insert (propertize (concat " " (car field) " ") 'face 'my-pi-offline-label)
+                  "\n" (propertize (concat (cdr field) "\n\n") 'line-prefix "  " 'wrap-prefix "  ")))
+        (dolist (row (sqlite-select (my-pi-history-open)
+                      "SELECT role,body FROM messages WHERE session_id=? AND message_id<>'' ORDER BY CAST(ordinal AS INTEGER)"
+                      (list (plist-get chat :id))))
+          (let ((user (equal (car row) "user")))
+            (insert (agent-shell-chat--label (if user "Me" "Pi") (if user 'user 'agent)) "\n\n")
+            (let ((start (point)))
+              (insert (cadr row) "\n")
+              (unless user
+                (save-restriction
+                  (narrow-to-region start (point))
+                  (funcall agent-shell-markdown-render-function :complete t :render-images nil
+                           :highlight-blocks agent-shell-highlight-blocks)
+                  (goto-char (point-max)))))
+            (insert "\n")))
+        (goto-char (point-min))))
     buffer))
 
 (defvar my-pi-accepted-contexts (make-hash-table :test #'equal)

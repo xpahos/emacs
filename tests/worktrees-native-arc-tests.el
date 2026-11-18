@@ -98,7 +98,7 @@
 (defmacro my-wt-native-fixture (&rest body)
   `(my-wt-test
     (let* ((source (my-wt-test-arc-source tmp)) (a (my-wt-test-sha ?a))
-           (remote "users/test/X") (head "trunk") (sha a) mounted calls dirty checkout-error remove-error (store "/s/new"))
+           (remote "users/test/X") (head "trunk") (sha a) mounted unmounted calls dirty checkout-error remove-error (store "/s/new"))
       (cl-letf (((symbol-function 'my-wt-run)
                  (lambda (dir _program args cb)
                    (push (cons dir args) calls)
@@ -107,6 +107,7 @@
                       (let ((entries (my-wt-json (my-wt-test-mounts source mounted))))
                         (when mounted
                           (setf (plist-get (cadr entries) :store) store
+                                (plist-get (cadr entries) :status) (if unmounted "unmounted" "mounted")
                                 (plist-get (cadr entries) :object-store) "/s/orig/o"))
                         (funcall cb 0 (json-serialize (vconcat entries)) "")))
                      (`("worktree" "remove" ,_)
@@ -115,6 +116,10 @@
                      (`("worktree" "add" ,root . ,_)
                       (setq mounted root store (cadr (member "--store" args)))
                       (make-directory (expand-file-name "cloud/compute" root) t)
+                      (funcall cb 0 "" ""))
+                     (`("mount" ,root . ,_)
+                      (should (equal root mounted))
+                      (setq unmounted nil)
                       (funcall cb 0 "" ""))
                      (`("status" . ,_) (funcall cb 0 (if dirty "{\"branch_info\":{},\"status\":{\"changed\":[\"a\"]}}" "{\"branch_info\":{},\"status\":{}}") ""))
                      (`("stash" "list") (funcall cb 0 "" ""))
@@ -127,6 +132,26 @@
                                            (setq head remote sha a) (funcall cb 0 "" "")))
                      (_ (error "Unexpected CLI: %S" args))))))
         ,@body))))
+
+(ert-deftest my-wt-native-create-and-remount-allow-other ()
+  (my-wt-native-fixture
+   (let* ((copy (my-wt-test-create source (list :branch remote :local remote :remote-ref remote :arc-verified t :sha a)))
+          (id (plist-get copy :copy_id))
+          (add (cdr (cl-find-if (lambda (c) (equal (seq-take (cdr c) 2) '("worktree" "add"))) calls))))
+     (should (equal (plist-get copy :state) "ready"))
+     (should (member "--allow-other" (cdr (member "--" add))))
+     (setq unmounted t calls nil)
+     (my-wt-update id :state "failed")
+     (my-wt-retry (my-wt-copy id))
+     (should (equal (plist-get (my-wt-copy id) :state) "ready"))
+     (should-not unmounted)
+     (should (member (list "mount" mounted "--allow-other") (mapcar #'cdr calls)))
+     (should-not (cl-find-if (lambda (c) (equal (seq-take (cdr c) 2) '("worktree" "add"))) calls))
+     (setq calls nil)
+     (my-wt-update id :state "failed")
+     (my-wt-retry (my-wt-copy id))
+     (should (equal (plist-get (my-wt-copy id) :state) "ready"))
+     (should-not (cl-find-if (lambda (c) (equal (cadr c) "mount")) calls)))))
 
 (ert-deftest my-wt-native-create-and-retry-check-actual-head ()
   (my-wt-native-fixture
