@@ -1,6 +1,21 @@
 ;;; rust-smoke.el --- Real Rust navigation in libtpms-rs-compat -*- lexical-binding: t; -*-
+;; Needs a libtpms-rs-compat checkout named by EMACS_TEST_RUST_ROOT (see README "Tests").
 (load (expand-file-name "projects-tests.el" (file-name-directory load-file-name)) nil t)
-(let* ((root "/Volumes/Sources/libtpms-rs-compat/")
+(defun my-test-rust-root ()
+  "Return the checkout named by EMACS_TEST_RUST_ROOT, or signal why it is unusable."
+  (let ((value (getenv "EMACS_TEST_RUST_ROOT")))
+    (when (or (null value) (string-empty-p value))
+      (error "EMACS_TEST_RUST_ROOT is not set; point it at a libtpms-rs-compat checkout"))
+    ;; Truename: rust-analyzer reports resolved paths, which symlinked roots would not match.
+    (let ((root (file-name-as-directory (file-truename (expand-file-name value)))))
+      (unless (file-directory-p root)
+        (error "EMACS_TEST_RUST_ROOT is not a directory: %s" root))
+      (dolist (fixture '("Cargo.toml" "src/ffi/api.rs" "src/version.rs"))
+        (unless (file-regular-p (expand-file-name fixture root))
+          (error "EMACS_TEST_RUST_ROOT %s is not a libtpms-rs-compat checkout: missing %s"
+                 root fixture)))
+      root)))
+(let* ((root (my-test-rust-root))
        (file (expand-file-name "src/ffi/api.rs" root))
        (target (make-temp-file "emacs-rust-target-" t))
        (eglot-connect-timeout 20)

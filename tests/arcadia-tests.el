@@ -2,10 +2,12 @@
 (require 'ert)
 (require 'cl-lib)
 (require 'package)
+(defconst my-arc-test-config-dir
+  (file-name-directory (directory-file-name (file-name-directory load-file-name))))
 (setq user-emacs-directory (make-temp-file "emacs-arc-tests-" t)
-      package-user-dir "/Volumes/Sources/emacs/elpa")
+      package-user-dir (expand-file-name "elpa" my-arc-test-config-dir))
 (package-initialize)
-(load "/Volumes/Sources/emacs/arcadia.el" t t)
+(load (expand-file-name "arcadia.el" my-arc-test-config-dir) t t)
 
 (ert-deftest my-arc-state-understands-staged-and-unstaged-changes ()
   (dolist (case '(("{}" . up-to-date)
@@ -225,7 +227,7 @@
     (unwind-protect
         (progn
           (fmakunbound 'vc-arc-responsible-p)
-          (load "/Volumes/Sources/emacs/arcadia.el" nil t)
+          (load (expand-file-name "arcadia.el" my-arc-test-config-dir) nil t)
           (should (fboundp 'vc-arc-responsible-p)))
       (fset 'vc-arc-responsible-p original))))
 

@@ -2,10 +2,12 @@
 (require 'ert)
 (require 'cl-lib)
 (require 'package)
+(defconst my-test-config-dir
+  (file-name-directory (directory-file-name (file-name-directory load-file-name))))
 (setq user-emacs-directory (make-temp-file "emacs-line-blame-tests-" t)
-      package-user-dir "/Volumes/Sources/emacs/elpa")
+      package-user-dir (expand-file-name "elpa" my-test-config-dir))
 (package-initialize)
-(load "/Volumes/Sources/emacs/arcadia.el" nil t)
+(load (expand-file-name "arcadia.el" my-test-config-dir) nil t)
 
 (defconst lb-arc-json
   "{\"annotation\":[

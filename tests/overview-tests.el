@@ -2,10 +2,12 @@
 (require 'ert)
 (require 'cl-lib)
 (require 'package)
-(let ((package-user-dir "/Volumes/Sources/emacs/elpa"))
+(defconst my-test-config-dir
+  (file-name-directory (directory-file-name (file-name-directory load-file-name))))
+(let ((package-user-dir (expand-file-name "elpa" my-test-config-dir)))
   (package-initialize))
 (require 'diff-hl)
-(load "/Volumes/Sources/emacs/overview.el" nil t)
+(load (expand-file-name "overview.el" my-test-config-dir) nil t)
 
 (ert-deftest my-overview-mirrors-real-diff-hl-markers ()
   (with-temp-buffer

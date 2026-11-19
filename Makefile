@@ -68,3 +68,12 @@ test-worktrees-arc-lifecycle:
 	@test -n "$(EMACS_TEST_ARC_SOURCE)" -a -n "$(EMACS_TEST_ARC_REMOTE)"
 	EMACS_TEST_REAL_ARC=1 EMACS_TEST_ARC_LIFECYCLE=1 $(EMACS) -Q --batch -l tests/worktrees-arc-tests.el \
 	  --eval '(ert-run-tests-batch-and-exit "real-arc")'
+
+.PHONY: test-agent-completion test-agent-completion-gui
+test-agent-completion:
+	$(EMACS) -Q --batch -l tests/agent-completion-tests.el -f ert-run-tests-batch-and-exit
+
+test-agent-completion-gui:
+	home=$$(mktemp -d -t emacs-agent-completion) && \
+	EMACS_TEST_HOME=$$home $(EMACS) -Q -l $(CURDIR)/tests/gui-agent-completion-smoke.el; \
+	status=$$?; cat $$home/passed $$home/failure 2>/dev/null; exit $$status

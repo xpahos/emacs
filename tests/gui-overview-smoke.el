@@ -3,7 +3,7 @@
       (file-name-as-directory (or (getenv "EMACS_TEST_HOME") (error "Test home required"))))
 (redisplay t)
 (require 'eglot)
-(load "/Volumes/Sources/emacs/init.el" nil t)
+(load (expand-file-name "../init.el" (file-name-directory load-file-name)) nil t)
 (require 'ert)
 (require 'dom)
 

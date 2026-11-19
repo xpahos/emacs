@@ -1,6 +1,6 @@
 ;;; modified-state-tests.el --- Check automatic clean-buffer detection -*- lexical-binding: t; -*-
 (require 'ert)
-(load "/Volumes/Sources/emacs/modified-state.el" nil t)
+(load (expand-file-name "../modified-state.el" (file-name-directory load-file-name)) nil t)
 
 (defmacro my-modified-test-file (bytes &rest body)
   (declare (indent 1))

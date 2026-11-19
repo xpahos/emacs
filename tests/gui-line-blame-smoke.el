@@ -7,7 +7,7 @@
 (redisplay t)
 (require 'eglot)
 (advice-add 'eglot-ensure :override #'ignore)
-(load "/Volumes/Sources/emacs/init.el" nil t)
+(load (expand-file-name "../init.el" (file-name-directory load-file-name)) nil t)
 (require 'ert)
 
 (defconst lb-arc-file (expand-file-name "~/arc/arcadia/util/generic/yexception.h"))
