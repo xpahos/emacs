@@ -343,8 +343,7 @@ Each working copy's file list is saved under its own root."
 (advice-add 'tabspaces-save-session :around #'my-project-save-parent-session)
 (advice-add 'tabspaces-restore-session :after #'my-project-session-trees)
 (advice-add 'tabspaces--restore-buffer-record :around #'my-project-skip-missing-file)
-;; Unmodified buffers follow external checkouts; modified ones keep the user's
-;; edits and report the conflict through Emacs' supersession check.
+;; disk-changes.el turns its reverts of local files into a reviewed notification.
 (global-auto-revert-mode 1)
 (unless noninteractive
   (add-hook 'kill-emacs-hook #'tabspaces--save-session-smart)

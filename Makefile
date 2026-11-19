@@ -77,3 +77,26 @@ test-agent-completion-gui:
 	home=$$(mktemp -d -t emacs-agent-completion) && \
 	EMACS_TEST_HOME=$$home $(EMACS) -Q -l $(CURDIR)/tests/gui-agent-completion-smoke.el; \
 	status=$$?; cat $$home/passed $$home/failure 2>/dev/null; exit $$status
+
+.PHONY: test-go-completion test-go-completion-gopls bench-go-completion
+test-go-completion:
+	$(EMACS) -Q --batch -l tests/go-completion-tests.el -f ert-run-tests-batch-and-exit
+	$(EMACS) -Q --batch -l tests/agent-completion-tests.el -f ert-run-tests-batch-and-exit
+
+# Needs gopls and go on PATH.
+test-go-completion-gopls:
+	$(EMACS) -Q --batch -l tests/go-completion-smoke.el
+
+# GUI; opens Emacs windows. Results go to a new temporary directory.
+bench-go-completion:
+	python3 tools/completion-bench.py --rounds 3
+
+.PHONY: test-disk-changes test-disk-changes-gui
+test-disk-changes:
+	$(EMACS) -Q --batch -l tests/disk-changes-tests.el -f ert-run-tests-batch-and-exit
+
+# GUI; opens a frame with Treemacs, chat and terminal panels.
+test-disk-changes-gui:
+	home=$$(mktemp -d -t emacs-disk-gui) && \
+	EMACS_TEST_HOME=$$home $(EMACS) -Q -l $(CURDIR)/tests/gui-disk-changes-smoke.el; \
+	status=$$?; cat $$home/result 2>/dev/null; exit $$status
