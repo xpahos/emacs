@@ -111,7 +111,7 @@
         (cl-assert (equal (buffer-local-value 'my-shell-context-id copy-shell) (concat "copy:" id)) nil
                    "Copy context %S != copy:%s; record %S; buffer %S"
                    (buffer-local-value 'my-shell-context-id copy-shell) id (my-wt-tab-copy) copy-shell)
-        (cl-assert (my-wt-delete-blockers copy))
+        (cl-assert (not (my-wt-delete-blockers copy)))
         (ghostel-send-string "echo COPY_HISTORY\n" t)
         (my-wt-switch original)
         (cl-assert (eq (window-buffer (my-shell-window)) shell))
@@ -120,9 +120,7 @@
         (cl-assert (process-live-p (buffer-local-value 'ghostel--process copy-shell)))
         (my-wt-switch copy)
         (cl-assert (eq (window-buffer (my-shell-window)) copy-shell))
-        (select-window (my-shell-window))
-        (ghostel-send-string " exit\n" t)
-        (my-test-shell-wait (lambda () (not (buffer-live-p copy-shell))) "copy shell exit"))
+        (select-window (my-shell-window)))
       (my-wt-delete copy)
       (my-test-shell-wait (lambda () (not (gethash id my-wt-busy))) "worktree deletion")
       (cl-assert (equal (plist-get (my-wt-copy id) :state) "deleted"))

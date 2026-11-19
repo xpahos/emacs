@@ -100,3 +100,10 @@ test-disk-changes-gui:
 	home=$$(mktemp -d -t emacs-disk-gui) && \
 	EMACS_TEST_HOME=$$home $(EMACS) -Q -l $(CURDIR)/tests/gui-disk-changes-smoke.el; \
 	status=$$?; cat $$home/result 2>/dev/null; exit $$status
+
+# GUI; pixel scrolling either comparison pane keeps both aligned.
+.PHONY: test-disk-changes-pixel-gui
+test-disk-changes-pixel-gui:
+	home=$$(mktemp -d -t emacs-disk-pixel) && \
+	EMACS_TEST_HOME=$$home $(EMACS) -Q -l $(CURDIR)/tests/gui-disk-changes-pixel-scroll.el; \
+	status=$$?; cat $$home/result 2>/dev/null; exit $$status

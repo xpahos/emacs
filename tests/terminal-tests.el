@@ -57,7 +57,7 @@
               (should (numberp (gethash "directory:/private/tmp/" my-shell-heights)))))
         (kill-buffer buffer)))))
 
-(ert-deftest my-shell-owned-process-blocks-delete-after-cd-outside ()
+(ert-deftest my-shell-owned-process-is-released-after-cd-outside ()
   (my-wt-test
    (let* ((repo (my-wt-test-repo (expand-file-name "repo/" tmp)))
           (source (my-wt-register repo))
@@ -72,8 +72,13 @@
            (should (memq buffer (my-wt-copy-buffers copy)))
            (should (seq-some (lambda (message) (string-match-p "Processes still run" message))
                              (my-wt-delete-blockers copy)))
-           (delete-process process)
-           (should-not (my-wt-delete-blockers copy)))
+           (with-current-buffer buffer
+             (setq major-mode 'ghostel-mode)
+             (setq-local ghostel--process process))
+           (should-not (my-wt-delete-blockers copy))
+           (my-wt-release copy)
+           (should-not (buffer-live-p buffer))
+           (should-not (process-live-p process)))
        (when (process-live-p process) (delete-process process))
        (kill-buffer buffer)))))
 

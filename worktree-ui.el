@@ -25,6 +25,7 @@
 (defvar my-wt-picker-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map text-mode-map)
+    (define-key map [escape] #'my-wt-picker-close)
     (define-key map (kbd "ESC") #'my-wt-picker-close)
     (define-key map (kbd "C-g") #'my-wt-picker-close)
     (define-key map (kbd "RET") #'my-wt-picker-enter)

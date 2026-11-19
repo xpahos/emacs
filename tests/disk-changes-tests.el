@@ -315,3 +315,176 @@
     (should (equal (buffer-string) "A\nlocal\n"))
     (should (buffer-modified-p))
     (should my-disk-pending)))
+
+;;; Comparison display
+
+(ert-deftest my-disk-panel-keeps-actions-inside-narrow-and-wide-windows ()
+  (my-disk-test "one\n"
+    (goto-char (point-max)) (insert "mine\n")
+    (setq my-disk-pending (list :hash "changed" :expanded t))
+    (should (fboundp 'my-disk-panel-layout))
+    (dolist (width '(320 640 800 1200))
+      (let* ((layout (my-disk-panel-layout width 16))
+             (buttons (plist-get layout :buttons)))
+        (should (>= (plist-get layout :height) 120))
+        (should (string-match-p "Unsaved" (plist-get layout :description)))
+        (should (equal (mapcar #'car buttons)
+                       '(my-disk-compare my-disk-reload my-disk-keep my-disk-later)))
+        (pcase-dolist (`(,command ,_ ,x ,y ,w ,h) buttons)
+          (should (<= (+ x w) width))
+          (should (<= (+ y h) (plist-get layout :height)))
+          (should (eq command (my-disk-panel-target layout (+ x (/ w 2)) (+ y (/ h 2))))))
+        (should-not (my-disk-panel-target layout 1 1))))
+    (setq my-disk-pending (list :hash 'missing :expanded t))
+    (should (equal (mapcar #'car (plist-get (my-disk-panel-layout 800 16) :buttons))
+                   '(my-disk-keep my-disk-later)))))
+
+(ert-deftest my-disk-row-mapping-round-trips-through-padding ()
+  ;; Two rows of padding before line 3, one before line 6.
+  (let ((pads '((3 . 2) (6 . 1))))
+    (should (equal (mapcar (lambda (line) (my-disk-row line pads)) '(1 2 3 4 6 7)) '(0 1 2 5 7 9)))
+    (should (equal (mapcar (lambda (row) (my-disk-line-at row pads)) (number-sequence 0 9))
+                   '((1 . 0) (2 . 0) (3 . 0) (3 . 1) (3 . 2) (4 . 0) (5 . 0) (6 . 0) (6 . 1) (7 . 0))))
+    (dolist (line '(1 2 4 5 7 20))
+      (should (equal (my-disk-line-at (my-disk-row line pads) pads) (cons line 0))))))
+
+(defun my-disk-test-lines (from to &optional prefix)
+  (mapconcat (lambda (n) (format "%s%d\n" (or prefix "common ") n)) (number-sequence from to) ""))
+
+(defconst my-disk-test-editor
+  (concat "editor-only top\n" (my-disk-test-lines 1 20)
+          "old middle\n" (my-disk-test-lines 21 40)
+          "editor-only a\neditor-only b\n" (my-disk-test-lines 41 60)
+          "common long " (make-string 300 ?x) "\n" (my-disk-test-lines 61 80)))
+
+(defconst my-disk-test-disk
+  (concat (my-disk-test-lines 1 20)
+          "new middle 1\nnew middle 2\nnew middle 3\n" (my-disk-test-lines 21 40)
+          (my-disk-test-lines 41 50) "disk-only\n" (my-disk-test-lines 51 60)
+          "common long " (make-string 300 ?x) "\n" (my-disk-test-lines 61 80)
+          "disk-only end 1\ndisk-only end 2\n"))
+
+(defun my-disk-test-shown-row (text)
+  "Aligned row of the line TEXT in the current snapshot."
+  (save-excursion
+    (goto-char (point-min))
+    (re-search-forward (concat "^" (regexp-quote text) "$"))
+    (let ((line (line-number-at-pos nil t)))
+      (+ (my-disk-row line my-disk-pads) (alist-get line my-disk-pads 0)))))
+
+(defmacro my-disk-test-comparison (&rest body)
+  "Run BODY in the control buffer comparing the test editor and disk texts."
+  (declare (indent 0))
+  `(my-disk-test my-disk-test-editor
+     (switch-to-buffer buffer)
+     (goto-char (point-max)) (insert "unsaved\n")
+     (my-disk-test-write file my-disk-test-disk)
+     (my-disk-check)
+     (my-disk-compare)
+     (let ((control (plist-get my-disk-compare :control)))
+       (unwind-protect (with-current-buffer control ,@body)
+         (when (buffer-live-p control) (with-current-buffer control (ediff-really-quit nil)))))))
+
+(ert-deftest my-disk-comparison-aligns-common-lines-without-changing-text ()
+  (my-disk-test-comparison
+    (should (equal (mapcar #'car my-disk-diffs) '(removed changed removed added changed)))
+    (with-current-buffer ediff-buffer-A
+      (should (equal (buffer-string) (concat my-disk-test-editor "unsaved\n")))
+      (should truncate-lines)
+      (should buffer-read-only))
+    (with-current-buffer ediff-buffer-B
+      (should (equal (buffer-string) my-disk-test-disk))
+      (should buffer-read-only))
+    (dolist (text (append (mapcar (lambda (n) (format "common %d" n)) (number-sequence 1 80))
+                          (list (concat "common long " (make-string 300 ?x)))))
+      (should (= (with-current-buffer ediff-buffer-A (my-disk-test-shown-row text))
+                 (with-current-buffer ediff-buffer-B (my-disk-test-shown-row text)))))
+    ;; Each difference spans the same rows in both panes.
+    (pcase-dolist (`(,_ ,row ,height ,a ,b) (append my-disk-diffs nil))
+      (should (= height (max (with-current-buffer ediff-buffer-A (apply #'count-lines a))
+                             (with-current-buffer ediff-buffer-B (apply #'count-lines b)))))
+      (should (>= row 0)))))
+
+(ert-deftest my-disk-comparison-scrolling-either-pane-moves-the-other ()
+  (my-disk-test-comparison
+    (let ((a ediff-window-A) (b ediff-window-B))
+      (dolist (pair `((,a ,b "common 45") (,b ,a "common 70") (,a ,b "common 3")))
+        (pcase-let ((`(,from ,to ,text) pair))
+          (with-current-buffer (window-buffer from)
+            (set-window-start from (save-excursion (goto-char (point-min))
+                                                   (re-search-forward (concat "^" text "$"))
+                                                   (line-beginning-position))))
+          (my-disk-sync from)
+          (should (equal (with-current-buffer (window-buffer to)
+                           (save-excursion (goto-char (window-start to))
+                                           (buffer-substring (point) (line-end-position))))
+                         text))
+          ;; The moved pane echoing back changes nothing.
+          (let ((state (my-disk-pane-state from)))
+            (my-disk-sync to)
+            (should (equal state (my-disk-pane-state from)))))))))
+
+(ert-deftest my-disk-comparison-selection-and-counter ()
+  (my-disk-test-comparison
+    (should (string-match-p "5 changes" (my-disk-overview)))
+    (ediff-next-difference)
+    (should (eql my-disk-selected 0))
+    (should (string-match-p "Change 1 of 5" (my-disk-overview)))
+    (ediff-next-difference)
+    (should (string-match-p "Change 2 of 5" (my-disk-overview)))
+    (should (eql my-disk-selected 1))
+    ;; The connector cells of only the selected change use the selected face.
+    (with-current-buffer ediff-buffer-B
+      (let ((faces (delete-dups
+                    (mapcar (lambda (o) (get-text-property 0 'face (cadr (get-text-property 0 'display (overlay-get o 'before-string)))))
+                            (seq-filter (lambda (o) (and (eql (overlay-get o 'my-disk-diff) 1)
+                                                         (= (overlay-start o) (overlay-end o))
+                                                         (get-text-property 0 'display (overlay-get o 'before-string))))
+                                        (overlays-in (point-min) (point-max)))))))
+        (should (equal faces '(my-disk-diff-selected)))))
+    ;; Selecting from a pane position picks that change in both.
+    (let ((pos (with-current-buffer ediff-buffer-A
+                 (goto-char (point-min)) (search-forward "editor-only a") (point))))
+      (with-current-buffer ediff-buffer-A (goto-char pos) (my-disk-select-at-point)))
+    (should (= ediff-current-difference 2))
+    (should (string-match-p "Change 3 of 5" (my-disk-overview)))
+    ;; The overview marks every change and is clickable.
+    (let ((strip (my-disk-overview-strip 40)))
+      (should (= (length strip) 40))
+      (should (equal (delete-dups (delq nil (mapcar (lambda (i) (cdr (get-text-property i 'my-disk-cell strip)))
+                                                    (number-sequence 0 39))))
+                     '(0 1 2 3 4))))))
+
+(ert-deftest my-disk-comparison-cleanup-leaves-no-trace ()
+  (my-disk-test my-disk-test-editor
+    (switch-to-buffer buffer)
+    (my-disk-test-write file my-disk-test-disk)
+    (my-disk-check)
+    (let ((config (current-window-configuration))
+          (mtime (file-attribute-modification-time (file-attributes file)))
+          snapshots control)
+      (my-disk-compare)
+      (setq control (plist-get my-disk-compare :control)
+            snapshots (with-current-buffer control (list ediff-buffer-A ediff-buffer-B)))
+      (should (memq #'my-disk-sync (buffer-local-value 'window-scroll-functions (car snapshots))))
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) (error "Unexpected quit confirmation"))))
+        (with-current-buffer control (ediff-next-difference)
+                             (call-interactively (key-binding (kbd "q")))))
+      (should-not (seq-some #'buffer-live-p (cons control snapshots)))
+      (should-not (memq #'my-disk-sync (default-value 'window-scroll-functions)))
+      (should-not (seq-some (lambda (b) (buffer-local-value 'my-disk-control b)) (buffer-list)))
+      (should-not (seq-some (lambda (o) (overlay-get o 'my-disk-diff)) (overlays-in (point-min) (point-max))))
+      (should (compare-window-configurations config (current-window-configuration)))
+      (should (equal (buffer-string) my-disk-test-editor))
+      (should-not (buffer-modified-p))
+      (should (equal (my-disk-test-file-text file) my-disk-test-disk))
+      (should (equal mtime (file-attribute-modification-time (file-attributes file)))))))
+
+(ert-deftest my-disk-quit-from-either-snapshot-does-not-ask ()
+  (dolist (side '(ediff-buffer-A ediff-buffer-B))
+    (my-disk-test-comparison
+      (let ((control (current-buffer)) (snapshot (symbol-value side)))
+        (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) (error "Unexpected quit confirmation"))))
+          (with-current-buffer snapshot (call-interactively (key-binding (kbd "q")))))
+        (should-not (buffer-live-p control))
+        (should-not (buffer-live-p snapshot))))))

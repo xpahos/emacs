@@ -275,6 +275,25 @@
       (should (string-search "existing" (buffer-string)))
       (should-not (string-search "New branch" (buffer-string))))))
 
+(ert-deftest my-wt-picker-native-escape-preserves-layout ()
+  (skip-unless (display-graphic-p))
+  (my-wt-test
+   (let ((repo (my-wt-test-repo (expand-file-name "repo/" tmp))))
+     (my-project-open repo)
+     (find-file (expand-file-name "sub/a.txt" repo))
+     (split-window-right)
+     (let* ((parent (selected-frame))
+            (windows (mapcar (lambda (w) (cons w (window-buffer w))) (window-list parent))))
+       (unwind-protect
+           (dolist (mode '(copies branches preview))
+             (my-wt-picker-show)
+             (setq my-wt-picker-mode mode)
+             (execute-kbd-macro [escape])
+             (should-not (frame-live-p my-wt-picker-frame))
+             (should (eq (selected-frame) parent))
+             (should (equal windows (mapcar (lambda (w) (cons w (window-buffer w))) (window-list parent)))))
+         (my-wt-picker-close))))))
+
 (ert-deftest my-wt-git-create-and-remove-leaves-source-unchanged ()
   (my-wt-test
    (let* ((repo (my-wt-test-repo (expand-file-name "repo/" tmp)))

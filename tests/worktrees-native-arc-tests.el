@@ -128,6 +128,8 @@
                      (`("info" . ,_) (funcall cb 0 (json-serialize `((hash . ,sha) (remote_head . ,a) (branch . ,head) (remote . ,head) (repository . "cloudia"))) ""))
                      (`("fetch" . ,_) (funcall cb 0 "" ""))
                      (`("rev-parse" . ,_) (funcall cb 0 a ""))
+                     (`("merge-base" "--json" ,_ "cloudia/trunk")
+                      (funcall cb 0 "{\"ahead\":1,\"behind\":1}" ""))
                      (`("checkout" ,_) (if checkout-error (funcall cb 1 "" "checkout failed")
                                            (setq head remote sha a) (funcall cb 0 "" "")))
                      (_ (error "Unexpected CLI: %S" args))))))
@@ -175,7 +177,7 @@
    (let* ((copy (my-wt-test-create source (list :branch remote :local remote :remote-ref remote :arc-verified t :sha a)))
           report failure)
      (cl-letf (((symbol-function 'my-wt-arc-ref-report)
-                (lambda (_s _spec cb) (funcall cb (list :local head :local-sha a :remote remote :relation 'remote-missing) nil)))
+                (lambda (_s _spec cb) (funcall cb (list :tenant "cloudia" :local head :local-sha a :remote remote :relation 'remote-missing) nil)))
                ((symbol-function 'my-wt-arc-tag-step) (lambda (_root) (lambda (next) (funcall next)))))
        (my-wt-arc-delete-report copy (lambda (r e) (setq report r failure e))))
      (should-not failure)
@@ -260,7 +262,8 @@
      (should (string-match-p "trunk" (string-join (plist-get report :blockers)))))))
 
 (ert-deftest my-wt-native-delete-dirty-stash-tags-and-unknown-block ()
-  (dolist (case '(("status" 0 "{\"branch_info\":{},\"status\":{\"ignored\":[\"valuable\"]}}")
+  (dolist (case '(("status" 0 "{\"branch_info\":{},\"status\":{\"changed\":[\"valuable\"]}}")
+                  ("status" 0 "{\"branch_info\":{},\"status\":{\"untracked\":[\"valuable\"]}}")
                   ("stash" 0 "stash@{0}: saved") ("tag" 0 "keep-this")
                   ("status" 0 "{}") ("fetch" 1 "network down")))
     (my-wt-native-fixture
@@ -272,6 +275,40 @@
                       (funcall run dir prog args cb)))))
          (my-wt-arc-delete-report copy (lambda (r e) (setq report r failure e))))
        (should (or failure (plist-get report :blockers)))))))
+
+(ert-deftest my-wt-native-delete-skips-ignored-files ()
+  (my-wt-native-fixture
+   (let* ((copy (my-wt-test-create source (list :branch remote :local remote :remote-ref remote :arc-verified t :sha a)))
+          (run (symbol-function 'my-wt-run)) failure)
+     (cl-letf (((symbol-function 'my-wt-run)
+                (lambda (dir prog args cb)
+                  (if (and (equal (car args) "status") (member "--ignored" args))
+                      (funcall cb 0 "{\"branch_info\":{},\"status\":{\"ignored\":[\"test.log\"]}}" "")
+                    (funcall run dir prog args cb))))
+               ((symbol-function 'my-wt-release) (lambda (_) nil)))
+       (my-wt-delete copy (lambda (e) (setq failure e))))
+     (should-not failure)
+     (should (equal (plist-get (my-wt-copy (plist-get copy :copy_id)) :state) "deleted")))))
+
+(ert-deftest my-wt-native-delete-missing-upstream-requires-merged-trunk ()
+  (dolist (ahead '(0 1))
+    (my-wt-native-fixture
+     (let* ((copy (my-wt-test-create source (list :branch remote :local remote :remote-ref remote :arc-verified t :sha a)))
+            (run (symbol-function 'my-wt-run)) report failure)
+       (cl-letf (((symbol-function 'my-wt-run)
+                  (lambda (dir prog args cb)
+                    (cond
+                     ((equal args (list "fetch" remote))
+                      (funcall cb 1 "" (format "error: can't fetch ref '%s'" remote)))
+                     ((equal args (list "merge-base" "--json" a "cloudia/trunk"))
+                      (funcall cb 0 (format "{\"ahead\":%s,\"behind\":246}" ahead) ""))
+                     (t (funcall run dir prog args cb))))))
+         (my-wt-arc-delete-report copy (lambda (r e) (setq report r failure e))))
+       (should-not failure)
+       (if (zerop ahead)
+           (progn (should-not (plist-get report :blockers))
+                  (should (equal (plist-get (car (plist-get report :branches)) :merged-into) "trunk")))
+         (should (plist-get report :blockers)))))))
 
 (ert-deftest my-wt-native-retry-uses-existing-tracking-branch ()
   (my-wt-native-fixture
