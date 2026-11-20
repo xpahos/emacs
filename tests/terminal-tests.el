@@ -2,6 +2,38 @@
 (load (expand-file-name "worktrees-tests.el" (file-name-directory load-file-name)) nil t)
 (load (expand-file-name "terminal.el" my-wt-test-config) nil t)
 
+(ert-deftest my-shell-command-click-opens-links-from-an-unselected-terminal ()
+  (let ((file (make-temp-file "shell-link-" nil ".txt" "first\nsecond\n"))
+        (shell (generate-new-buffer "*shell-link-test*"))
+        opened)
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (let* ((editor (selected-window)) (terminal (split-window-below))
+                 (position (list terminal 1 '(0 . 0) 0)))
+            (set-window-buffer terminal shell)
+            (dolist (uri (list "https://example.org/" (concat "fileref:" file ":2:3")))
+              (with-current-buffer shell
+                (erase-buffer)
+                (insert (propertize "link" 'keymap ghostel-link-map 'help-echo uri)))
+              (select-window editor)
+              (cl-letf (((symbol-function 'browse-url) (lambda (url &rest _) (setq opened url))))
+                (funcall (lookup-key ghostel-link-map [s-down-mouse-1]) (list 's-down-mouse-1 position))
+                (should-not opened)
+                (funcall (lookup-key ghostel-link-map [s-mouse-1]) (list 's-mouse-1 position)))
+              (if (string-prefix-p "https:" uri)
+                  (progn (should (equal opened uri)) (setq opened nil))
+                (should (equal (buffer-file-name) file))
+                (should (= (line-number-at-pos) 2))
+                (should (= (current-column) 2))))))
+      (when-let* ((buffer (get-file-buffer file))) (kill-buffer buffer))
+      (kill-buffer shell)
+      (delete-file file))))
+
+(ert-deftest my-shell-plain-clicks-do-not-open-links ()
+  (dolist (key '([mouse-1] [mouse-2]))
+    (should-not (lookup-key ghostel-link-map key))))
+
 (ert-deftest my-shell-context-survives-branch-and-separates-copies ()
   (should (equal (my-shell-context '(:role "original" :vcs "git" :project_id "p" :branch "main") "/tmp/")
                  (my-shell-context '(:role "original" :vcs "git" :project_id "p" :branch "x") "/tmp/")))

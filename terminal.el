@@ -248,9 +248,17 @@
 (global-set-key (kbd "C-c t") #'my-shell-toggle)
 (define-key ghostel-mode-map (kbd "C-c t") #'my-shell-toggle)
 (define-key ghostel-semi-char-mode-map (kbd "C-c t") #'my-shell-toggle)
-;; Keep clicks in terminal output from opening another window or application.
+(defun my-shell-open-link-at-click (event)
+  "Open the clicked terminal link, even when another window has focus."
+  (interactive "e")
+  (select-window (posn-window (event-start event)))
+  (ghostel-open-link-at-click event))
+
+;; Only Command-click opens links; plain clicks retain terminal selection.
 (define-key ghostel-link-map [mouse-1] nil)
 (define-key ghostel-link-map [mouse-2] nil)
+(define-key ghostel-link-map [s-down-mouse-1] #'ignore)
+(define-key ghostel-link-map [s-mouse-1] #'my-shell-open-link-at-click)
 (add-hook 'window-size-change-functions #'my-shell-remember-height)
 (add-hook 'tab-bar-tab-post-select-functions #'my-shell-after-select)
 (add-hook 'my-wt-deleted-hook #'my-shell-cleanup-copy)
