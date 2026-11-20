@@ -1020,18 +1020,13 @@ newline would merge the input line into the response for line motion
                            (get-text-property (point) 'font-lock-face))
                           mend
                         (point))))
-               ;; Start just past the input's line terminator: the first
-               ;; newline after the input, whether it precedes the marker
-               ;; (live turns: \"input\\n<marker>\") or follows it (restored
-               ;; turns: \"input<marker>\\n\").  That newline stays visible
-               ;; while extra blank lines are hidden; hiding it would merge
-               ;; the input line into the response for line motion (e.g.
-               ;; `end-of-visual-line').  Bounded by `end' so the search stops
-               ;; before the response body.  The marker hides itself.
+               ;; Keep a preceding input newline, but never start past the
+               ;; marker: restored turns need its buffer positions for
+               ;; scrollable label rows, including the input's terminator.
                (start (save-excursion
                         (goto-char mbeg)
                         (skip-chars-backward " \t\n")
-                        (if (re-search-forward "\n" end t) (point) mbeg)))
+                        (if (re-search-forward "\n" mbeg t) (point) mbeg)))
                ;; With the terminator kept, one leading newline pads the label;
                ;; without one keep two.
                (before (concat (if (and (> start (point-min))
@@ -1062,7 +1057,7 @@ newline would merge the input line into the response for line motion
                    ;; span opens on the marker, which is hidden either way and
                    ;; long enough to carry them.
                    (split (<= (length rows) (- end start)))
-                   (body-start (if split (+ start (length rows)) start)))
+                   (body-start (if split (+ start (1- (length rows))) start)))
               (when split
                 (seq-do-indexed
                  (lambda (row offset)
@@ -1083,13 +1078,15 @@ newline would merge the input line into the response for line motion
                      :props (append (agent-shell-chat--row-props row)
                                     (list (cons 'priority 100))))
                     kept))
-                 rows))
+                 (butlast rows)))
               (push
                (agent-shell-chat--ensure-overlay
                 :tag 'agent :beg body-start :end end
                 :anchor-beg (if split body-start mbeg) :anchor-end end
                 :props (list (cons 'before-string (if split "" before))
-                             (cons 'display "")
+                             ;; Keep the final blank row on the remaining span;
+                             ;; an empty display after it can trap line scrolling.
+                             (cons 'display (if split "\n" ""))
                              ;; The response's first line starts a row inside
                              ;; this overlay, where the label's last row ended,
                              ;; so the row takes its prefix from here rather

@@ -249,10 +249,13 @@
 (define-key ghostel-mode-map (kbd "C-c t") #'my-shell-toggle)
 (define-key ghostel-semi-char-mode-map (kbd "C-c t") #'my-shell-toggle)
 (defun my-shell-open-link-at-click (event)
-  "Open the clicked terminal link, even when another window has focus."
+  "Open the clicked terminal link, reusing an existing editor window."
   (interactive "e")
   (select-window (posn-window (event-start event)))
-  (ghostel-open-link-at-click event))
+  (let ((display-buffer-overriding-action
+         '((display-buffer-reuse-window display-buffer-use-some-window)
+           (inhibit-same-window . t) (some-window . mru))))
+    (ghostel-open-link-at-click event)))
 
 ;; Only Command-click opens links; plain clicks retain terminal selection.
 (define-key ghostel-link-map [mouse-1] nil)

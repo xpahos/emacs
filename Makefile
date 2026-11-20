@@ -9,6 +9,10 @@ pi-acp:
 	npm ci --prefix tools/pi-acp --ignore-scripts --no-audit --no-fund
 
 EMACS ?= /Applications/MacPorts/Emacs.app/Contents/MacOS/Emacs
+.PHONY: test-agent-scroll
+test-agent-scroll:
+	$(EMACS) -Q --batch -l tests/agent-scroll-tests.el -f ert-run-tests-batch-and-exit
+
 .PHONY: test-keyboard
 test-keyboard:
 	$(EMACS) -Q --batch -l tests/keyboard-tests.el -f ert-run-tests-batch-and-exit
