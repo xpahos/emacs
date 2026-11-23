@@ -17,8 +17,8 @@
 
 (ert-deftest line-blame-parses-arc-json ()
   (should (equal (line-blame--parse-arc lb-arc-json)
-                 '(("12.11.2026" "ivan" "a" "12.11.2026, 23:30" "")
-                   ("14.11.2026" "Анна Смирнова" "b" "14.11.2026, 10:00" "")))))
+                 '(("12.11.2026" "ivan" "a" "12.11.2026, 23:30" "" "x")
+                   ("14.11.2026" "Анна Смирнова" "b" "14.11.2026, 10:00" "" "run()")))))
 
 (ert-deftest line-blame-parses-arc-commit-metadata ()
   (let* ((json (json-serialize
@@ -58,11 +58,11 @@
     ;; Email local part when present; the author name when the email is empty.
     (should (equal (line-blame--parse-git out)
                    '(("13.11.2026" "анна" "e5a58b0d17d40d9212613fdb1c2387ccf0f3e21f"
-                      "13.11.2026, 01:30" nil)
+                      "13.11.2026, 01:30" nil "author fake line")
                      ("12.11.2026" "Ivan Petrov" "8d8f55d82b2725f9be9e44b55cfdc0a8cb0b4975"
-                      "12.11.2026, 21:00" nil)
+                      "12.11.2026, 21:00" nil "")
                      ("12.11.2026" "xpahos" "e5a58b0d17d40d9212613fdb1c2387ccf0f3e21f"
-                      "12.11.2026, 22:30" nil))))))
+                      "12.11.2026, 22:30" nil "x"))))))
 
 (ert-deftest line-blame-shades-by-date ()
   (should (= (line-blame--day "02.01.1970") 1))
@@ -122,7 +122,9 @@
 
 (defun lb-prefixes ()
   (mapcar (lambda (o) (substring-no-properties (overlay-get o 'line-prefix)))
-          (sort (overlays-in (point-min) (point-max))
+          ;; Other modes (diff-hl after saving) add overlays of their own.
+          (sort (cl-remove-if-not (lambda (o) (overlay-get o 'line-prefix))
+                                  (overlays-in (point-min) (point-max)))
                 (lambda (a b) (< (overlay-start a) (overlay-start b))))))
 
 (ert-deftest line-blame-git-toggle-preserves-buffer ()
@@ -162,34 +164,113 @@
       (should (= (length (lb-prefixes)) 2))
       (should (= (overlay-end (car line-blame--overlays)) (point-max))))))
 
-(ert-deftest line-blame-refuses-files-that-differ-from-head ()
-  (let ((dir (lb-git-repo '(("a" . "a\n") ("b" . "b\n")))))
-    (with-temp-file (expand-file-name "a" dir) (insert "changed\n"))
-    (with-temp-file (expand-file-name "b" dir) (insert "staged\n"))
-    (lb-git dir "add" "b")
-    (with-temp-file (expand-file-name "new" dir) (insert "new\n"))
-    (dolist (case '(("a" . "uncommitted") ("b" . "uncommitted") ("new" . "not tracked")))
+(ert-deftest line-blame-maps-lines-through-a-diff ()
+  (should (equal (line-blame--map '("a" "b" "c") '("a" "b" "c")) '(0 1 2)))
+  (should (equal (line-blame--map '("a" "b" "c") '("new" "a" "b" "c")) '(nil 0 1 2)))
+  (should (equal (line-blame--map '("a" "b" "c") '("a" "c")) '(0 2)))
+  (should (equal (line-blame--map '("a" "b" "c") '("a" "B" "c")) '(0 nil 2)))
+  ;; Duplicated lines keep their own positions; CRLF endings compare equal.
+  (should (equal (line-blame--map '("}" "x" "}") '("}" "y" "x" "}")) '(0 nil 1 2)))
+  (should (equal (line-blame--map '("a\r" "b\r") '("a" "b")) '(0 1)))
+  (should (equal (line-blame--map '("a") nil) nil))
+  (should (equal (line-blame--map nil '("a")) '(nil))))
+
+(defun lb-local-p (prefix) (and (string-match-p "Local changes" prefix) t))
+
+(defun lb-git-history-repo ()
+  "Repository with a.txt lines one..four from commit 1 and five from commit 2."
+  (let ((dir (lb-git-repo '(("a.txt" . "one\ntwo\nthree\nfour\n") ("new" . "")))))
+    (write-region "one\ntwo\nthree\nfour\nfive\n" nil (expand-file-name "a.txt" dir))
+    (lb-git dir "-c" "commit.gpgsign=false" "-c" "user.name=Ivan" "-c" "user.email=ivan@x"
+            "commit" "-qam" "five")
+    dir))
+
+(ert-deftest line-blame-git-maps-saved-local-changes ()
+  (let ((dir (lb-git-history-repo)))
+    ;; Unstaged and staged changes are both relative to HEAD.
+    (dolist (stage '(nil t))
+      (write-region "zero\none\nTWO\nfour\nfive\n" nil (expand-file-name "a.txt" dir))
+      (when stage (lb-git dir "add" "a.txt"))
+      (lb-with-file (expand-file-name "a.txt" dir)
+        (line-blame-mode 1)
+        (lb-wait)
+        (should line-blame-mode)
+        (let ((prefixes (lb-prefixes)))
+          (should (= (length prefixes) 5))
+          (should (equal (mapcar #'lb-local-p prefixes) '(t nil t nil nil)))
+          (should (string-match-p "очень" (nth 1 prefixes)))
+          (should (string-match-p "очень" (nth 3 prefixes)))
+          (should (string-match-p "ivan" (nth 4 prefixes))))
+        ;; Local lines are not hoverable, so they never fetch commit details.
+        (dolist (overlay line-blame--overlays)
+          (let ((prefix (overlay-get overlay 'line-prefix)))
+            (should (eq (null (get-text-property 2 'line-blame-entry prefix))
+                        (and (lb-local-p prefix) t)))))))))
+
+(ert-deftest line-blame-still-refuses-untracked-and-ignored-files ()
+  (let ((dir (lb-git-repo '(("a" . "a\n") (".gitignore" . "ign\n")))))
+    (write-region "new\n" nil (expand-file-name "new" dir))
+    (write-region "ign\n" nil (expand-file-name "ign" dir))
+    (dolist (case '(("new" . "not tracked") ("ign" . "ignored")))
       (lb-with-file (expand-file-name (car case) dir)
         (line-blame-mode 1)
         (lb-wait)
         (should-not line-blame-mode)
         (should-not (overlays-in (point-min) (point-max)))
-        (should (string-match-p (cdr case) (lb-last-message)))))
-    (lb-with-file (expand-file-name "a" dir)
-      (insert "x")
-      (should-error (line-blame-mode 1) :type 'user-error)
-      (should-not line-blame-mode))))
+        (should (string-match-p (cdr case) (lb-last-message)))))))
 
-(ert-deftest line-blame-hides-when-editing-begins ()
-  (let ((dir (lb-git-repo '(("a" . "a\nb\n")))))
-    (lb-with-file (expand-file-name "a" dir)
+(ert-deftest line-blame-follows-unsaved-edits ()
+  (let ((dir (lb-git-history-repo)))
+    (lb-with-file (expand-file-name "a.txt" dir)
+      (buffer-enable-undo)
+      ;; Unsaved edits before enabling do not disable blame.
+      (goto-char (point-min))
+      (insert "top\n")
       (line-blame-mode 1)
       (lb-wait)
-      (should line-blame--overlays)
-      (insert "x")
-      (should-not line-blame-mode)
-      (should-not (overlays-in (point-min) (point-max)))
-      (should (string-match-p "hidden" (lb-last-message))))))
+      (should line-blame-mode)
+      (should (equal (mapcar #'lb-local-p (lb-prefixes)) '(t nil nil nil nil nil)))
+      (let ((undo buffer-undo-list))
+        ;; Split "two": its annotation goes at once, never onto the new line.
+        (goto-char (point-min))
+        (forward-line 2)
+        (forward-char 1)
+        (insert "\n")
+        (should (= (length (lb-prefixes)) 5))
+        (should-not (cl-some (lambda (o) (= (line-number-at-pos (overlay-start o)) 3))
+                             line-blame--overlays))
+        (should line-blame--timer)
+        (line-blame--refresh (current-buffer))
+        (should (equal (mapcar #'lb-local-p (lb-prefixes)) '(t nil t t nil nil nil)))
+        ;; Deleting a line keeps the lines after it attributed.
+        (delete-region (point-min) (progn (goto-char (point-min)) (forward-line 1) (point)))
+        (line-blame--refresh (current-buffer))
+        (should (equal (mapcar #'lb-local-p (lb-prefixes)) '(nil t t nil nil nil)))
+        (should (string-match-p "ivan" (car (last (lb-prefixes)))))
+        ;; Re-rendering touches neither the undo history nor the modified flag.
+        (setq undo buffer-undo-list)
+        (line-blame--refresh (current-buffer))
+        (should (eq buffer-undo-list undo))
+        (should (buffer-modified-p))
+        ;; Restoring HEAD's text restores every annotation.
+        (erase-buffer)
+        (insert "one\ntwo\nthree\nfour\nfive\n")
+        (line-blame--refresh (current-buffer))
+        (should-not (cl-some #'lb-local-p (lb-prefixes)))
+        (should (= (length (lb-prefixes)) 5)))
+      ;; Saving keeps the annotations; reverting fetches them again.
+      (goto-char (point-min))
+      (insert "saved\n")
+      (save-buffer)
+      (line-blame--refresh (current-buffer))
+      (should (equal (mapcar #'lb-local-p (lb-prefixes)) '(t nil nil nil nil nil)))
+      (write-region "one\ntwo\nthree\nfour\nfive\n" nil buffer-file-name)
+      (revert-buffer t t t)
+      (lb-wait)
+      (should line-blame-mode)
+      (should-not (cl-some #'lb-local-p (lb-prefixes)))
+      (should (= (length line-blame--overlays) 5))
+      (should-not (buffer-modified-p)))))
 
 ;;; Arc, through a scripted executable
 
@@ -299,6 +380,19 @@ esac
     (lb-wait 5)
     (should line-blame-mode)
     (should (= (length (overlays-in (point-min) (point-max))) 2))))
+
+(ert-deftest line-blame-arc-maps-edits-made-while-loading ()
+  (lb-with-arc '("LB_SLEEP=1") "{\"status\":{\"changed\":[{\"path\":\"a.go\"}]}}"
+    (line-blame-mode 1)
+    (lb-wait-for-blame-process)
+    (goto-char (point-min))
+    (insert "// new\n")
+    (should-not line-blame--timer)
+    (lb-wait 5)
+    (should line-blame-mode)
+    (should (equal (lb-prefixes) '("│ Local changes             │ "
+                                   "│ 12.11.2026  ivan          │ "
+                                   "│ 14.11.2026  Анна Смирнова │ ")))))
 
 (ert-deftest line-blame-major-mode-change-removes-annotations ()
   (lb-with-arc nil "{\"status\":{}}"
@@ -488,7 +582,6 @@ esac
 
 (ert-deftest line-blame-hover-cleanup-hides-and-stops-timers ()
   (dolist (action (list (lambda () (line-blame-mode -1))
-                        (lambda () (insert "x"))
                         (lambda () (text-mode))
                         (lambda () (set-buffer-modified-p nil) (kill-buffer))))
     (lb-with-hover

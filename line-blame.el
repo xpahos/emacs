@@ -24,6 +24,8 @@
   "Token of the pending request: a one-element list holding its live process.")
 (defvar-local line-blame--overlays nil)
 (defvar-local line-blame--root nil "Repository root, part of the commit cache key.")
+(defvar-local line-blame--entries nil "Blame entries for HEAD, one per HEAD line.")
+(defvar-local line-blame--timer nil "Idle timer re-mapping annotations after edits.")
 
 (defvar line-blame-hover-delay 0.4
   "Seconds the pointer must rest on an annotation before commit details appear.")
@@ -37,7 +39,7 @@
     (concat message "\n\nREVIEW: " review)))
 
 (defun line-blame--parse-arc (output)
-  "Return (DATE AUTHOR COMMIT TIME MESSAGE) per line of Arc `blame --json' OUTPUT.
+  "Return (DATE AUTHOR COMMIT TIME MESSAGE TEXT) per line of Arc `blame --json' OUTPUT.
 AUTHOR is the Arc login.  Arc includes full messages, so none is fetched later."
   (let* ((json (json-parse-string output :object-type 'alist :array-type 'list))
          (messages (make-hash-table :test #'equal)))
@@ -54,12 +56,13 @@ AUTHOR is the Arc login.  Arc includes full messages, so none is fetched later."
                       (alist-get 'author entry) commit
                       (format "%s.%s.%s, %s" (substring date 8 10) (substring date 5 7)
                               (substring date 0 4) (substring date 11 16))
-                      (gethash commit messages ""))))
+                      (gethash commit messages "")
+                      (string-remove-suffix "\n" (or (alist-get 'text entry) "")))))
             (sort (alist-get 'annotation json)
                   (lambda (a b) (< (alist-get 'line a) (alist-get 'line b)))))))
 
 (defun line-blame--parse-git (output)
-  "Return (DATE AUTHOR COMMIT TIME nil) per line of Git porcelain blame OUTPUT.
+  "Return (DATE AUTHOR COMMIT TIME nil TEXT) per line of Git porcelain blame OUTPUT.
 AUTHOR is the local part of the author's email, or their name without one.
 Porcelain output has only the summary, so messages are fetched on hover."
   (with-temp-buffer
@@ -69,7 +72,8 @@ Porcelain output has only the summary, so messages are fetched on hover."
       (while (not (eobp))
         (cond ((eq (char-after) ?\t)
                (push (list (format-time-string "%d.%m.%Y" time zone) (or login author)
-                           commit (format-time-string "%d.%m.%Y, %H:%M" time zone) nil)
+                           commit (format-time-string "%d.%m.%Y, %H:%M" time zone) nil
+                           (buffer-substring (1+ (point)) (line-end-position)))
                      entries))
               ((looking-at "\\([0-9a-f]\\{40,64\\}\\) [0-9]+ [0-9]+")
                (setq commit (match-string 1)))
@@ -88,15 +92,40 @@ Porcelain output has only the summary, so messages are fetched on hover."
       (nreverse entries))))
 
 (defun line-blame--dirty-reason (backend status)
-  "Return why STATUS output shows the file differs from HEAD, or nil."
+  "Return why STATUS output shows the file has no HEAD history, or nil.
+Local changes are fine: they are mapped onto HEAD's lines when rendering."
   (if (eq backend 'Arc)
       (let ((status (alist-get 'status (json-parse-string status :object-type 'alist))))
         (cond ((alist-get 'untracked status) "the file is not tracked")
-              ((alist-get 'ignored status) "the file is ignored")
-              (status "the file has uncommitted changes")))
+              ((alist-get 'ignored status) "the file is ignored")))
     (cond ((string-prefix-p "??" status) "the file is not tracked")
-          ((string-prefix-p "!!" status) "the file is ignored")
-          ((not (string-empty-p status)) "the file has uncommitted changes"))))
+          ((string-prefix-p "!!" status) "the file is ignored"))))
+
+(defun line-blame--map (old new)
+  "Return, for each string in NEW, the index of the OLD string it is kept from, or nil.
+OLD and NEW are lists of lines; the result follows a minimal line diff."
+  (let ((codes (make-hash-table :test #'equal)))
+    ;; One character per distinct line turns the C character diff into a line diff.
+    (cl-flet ((encode (lines)
+                (concat (mapcar (lambda (line)
+                                  (let ((key (string-remove-suffix "\r" line)))
+                                    (or (gethash key codes)
+                                        (puthash key (+ #x100 (hash-table-count codes))
+                                                 codes))))
+                                lines))))
+      (let ((old (encode old)) (new (encode new)) result)
+        (dotimes (i (length old)) (put-text-property i (1+ i) 'line-blame-index i old))
+        (with-temp-buffer
+          (let ((target (current-buffer)))
+            (insert old)
+            (with-temp-buffer
+              (insert new)
+              (let ((source (current-buffer)))
+                ;; Unchanged characters keep their properties; inserted ones have none.
+                (with-current-buffer target (replace-buffer-contents source)))))
+          (dotimes (i (buffer-size))
+            (push (get-text-property (1+ i) 'line-blame-index) result)))
+        (nreverse result)))))
 
 ;;; Processes
 
@@ -145,8 +174,6 @@ Porcelain output has only the summary, so messages are fetched on hover."
   "Fetch blame for the whole file asynchronously, then render it."
   (let* ((file (or buffer-file-name (user-error "Blame needs a file buffer")))
          (_ (when (file-remote-p file) (user-error "Blame does not support remote files")))
-         (_ (when (buffer-modified-p)
-              (user-error "Blame unavailable: the buffer has unsaved changes")))
          (arc (vc-arc-root file))
          (root (or arc (vc-git-root file)
                    (user-error "Blame unavailable: not in an Arc or Git repository")))
@@ -159,8 +186,8 @@ Porcelain output has only the summary, so messages are fetched on hover."
                   (line-blame--run token program args callback))))
       (setq line-blame--request token
             line-blame--root root)
-      (add-hook 'first-change-hook #'line-blame--edited nil t)
-      (add-hook 'after-revert-hook #'line-blame--edited nil t)
+      (add-hook 'after-change-functions #'line-blame--edited nil t)
+      (add-hook 'after-revert-hook #'line-blame--reverted nil t)
       (add-hook 'kill-buffer-hook #'line-blame--cleanup nil t)
       ;; Runs before local variables, including the overlay list, are reset.
       (add-hook 'change-major-mode-hook #'line-blame--cleanup nil t)
@@ -180,12 +207,14 @@ Porcelain output has only the summary, so messages are fetched on hover."
                                  ;; Discard blame for a revision that is no longer checked out.
                                  (run '("rev-parse" "HEAD")
                                       (lambda (now)
-                                        (cond
-                                         ((not (equal (string-trim now) head))
-                                          (line-blame--fail "HEAD changed while loading"))
-                                         ((not (verify-visited-file-modtime))
-                                          (line-blame--fail "the file changed on disk"))
-                                         (t (line-blame--render entries))))))))))))))
+                                        (if (not (equal (string-trim now) head))
+                                            (line-blame--fail "HEAD changed while loading")
+                                          ;; Mapped onto the buffer as it is now, so
+                                          ;; edits made while loading cannot misalign.
+                                          (setq line-blame--entries entries)
+                                          (line-blame--render)
+                                          (setq line-blame--request nil)
+                                          (message "Loading blame...done")))))))))))))
       (message "Loading blame..."))))
 
 ;;; Display
@@ -210,40 +239,53 @@ Porcelain output has only the summary, so messages are fetched on hover."
                    `(:background ,(color-darken-name background (* 3 step)))))
             '(0 1 2 3 4))))
 
-(defun line-blame--render (entries)
+(defun line-blame--render ()
+  "Annotate lines unchanged from HEAD with their commit, others as local changes."
+  (mapc #'delete-overlay line-blame--overlays)
+  (setq line-blame--overlays nil)
   (save-excursion
     (save-restriction
       (widen)
-      (unless (= (length entries) (count-lines (point-min) (point-max)))
-        (error "blame does not match the buffer contents"))
-      (let* ((width (min line-blame-author-width
-                         (apply #'max 0 (mapcar (lambda (e) (string-width (nth 1 e))) entries))))
-             (days (mapcar (lambda (e) (line-blame--day (car e))) entries))
-             (first (and days (apply #'min days)))
-             (last (and days (apply #'max days)))
+      (let* ((entries line-blame--entries)
+             (head (vconcat entries))
+             (lines (split-string (buffer-substring-no-properties (point-min) (point-max))
+                                  "\n"))
+             ;; A final newline ends the last line rather than starting another.
+             (lines (if (equal (car (last lines)) "") (butlast lines) lines))
+             ;; At least one column, so "Local changes" fits in the date and author slot.
+             (width (min line-blame-author-width
+                         (apply #'max 1 (mapcar (lambda (e) (string-width (nth 1 e))) entries))))
+             (days (vconcat (mapcar (lambda (e) (line-blame--day (car e))) entries)))
+             (first (and entries (seq-min days)))
+             (last (and entries (seq-max days)))
              (shades (line-blame--shade-faces))
              ;; "│ DD.MM.YYYY  AUTHOR │ ": separators after line numbers and before code.
              (blank (propertize (make-string (+ 2 10 2 width 3) ?\s) 'face 'line-blame)))
         (goto-char (point-min))
         (cl-loop
-         for entry in entries for day in days do
-         (let ((overlay (make-overlay (point) (progn (forward-line 1) (point)))))
+         for index in (line-blame--map (mapcar (lambda (e) (nth 5 e)) entries) lines) do
+         (let ((overlay (make-overlay (point) (progn (forward-line 1) (point))))
+               (entry (and index (aref head index))))
            (overlay-put overlay 'line-prefix
                         (concat (propertize "│ " 'face 'line-blame)
-                                ;; Only date and nickname are shaded and hoverable.
-                                (propertize (concat (car entry) "  "
-                                                    (truncate-string-to-width
-                                                     (nth 1 entry) width nil ?\s "…"))
-                                            'face (list (nth (line-blame--shade day first last)
-                                                             shades)
-                                                        'line-blame)
-                                            'line-blame-entry entry)
+                                (if (null entry)
+                                    ;; No entry property: nothing to hover or fetch.
+                                    (propertize (truncate-string-to-width
+                                                 "Local changes" (+ 10 2 width) nil ?\s "…")
+                                                'face 'line-blame)
+                                  ;; Only date and nickname are shaded and hoverable.
+                                  (propertize (concat (car entry) "  "
+                                                      (truncate-string-to-width
+                                                       (nth 1 entry) width nil ?\s "…"))
+                                              'face (list (nth (line-blame--shade
+                                                                (aref days index) first last)
+                                                               shades)
+                                                          'line-blame)
+                                              'line-blame-entry entry))
                                 (propertize " │ " 'face 'line-blame)))
            (overlay-put overlay 'wrap-prefix blank)
            (push overlay line-blame--overlays))))))
-  (when line-blame--overlays (line-blame--watch-pointer))
-  (setq line-blame--request nil)
-  (message "Loading blame...done"))
+  (when line-blame--overlays (line-blame--watch-pointer)))
 
 (defun line-blame--cleanup ()
   "Cancel pending work and remove annotations."
@@ -251,17 +293,41 @@ Porcelain output has only the summary, so messages are fetched on hover."
     ;; Invalidate first: `delete-process' runs the sentinel synchronously.
     (setq line-blame--request nil)
     (when process (delete-process process)))
+  (when line-blame--timer (cancel-timer line-blame--timer))
+  (setq line-blame--timer nil
+        line-blame--entries nil)
   (mapc #'delete-overlay line-blame--overlays)
   (setq line-blame--overlays nil)
   (line-blame--unwatch-pointer)
-  (remove-hook 'first-change-hook #'line-blame--edited t)
-  (remove-hook 'after-revert-hook #'line-blame--edited t)
+  (remove-hook 'after-change-functions #'line-blame--edited t)
+  (remove-hook 'after-revert-hook #'line-blame--reverted t)
   (remove-hook 'kill-buffer-hook #'line-blame--cleanup t)
   (remove-hook 'change-major-mode-hook #'line-blame--cleanup t))
 
-(defun line-blame--edited ()
-  (line-blame-mode -1)
-  (message "Blame hidden: the buffer no longer matches HEAD"))
+(defun line-blame--edited (beg end _length)
+  "Drop annotations of the changed lines at once; re-map the buffer when idle."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (dolist (overlay (overlays-in (progn (goto-char beg) (line-beginning-position))
+                                    (progn (goto-char end)
+                                           (min (point-max) (1+ (line-end-position))))))
+        (when (memq overlay line-blame--overlays) (delete-overlay overlay)))))
+  ;; While loading there is nothing to re-map: the result maps the buffer it finds.
+  (when line-blame--entries
+    (when line-blame--timer (cancel-timer line-blame--timer))
+    (setq line-blame--timer
+          (run-with-idle-timer 0.3 nil #'line-blame--refresh (current-buffer)))))
+
+(defun line-blame--refresh (buffer)
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq line-blame--timer nil)
+      (when line-blame--entries (line-blame--render)))))
+
+(defun line-blame--reverted ()
+  "Fetch blame again: a revert may follow a checkout that moved HEAD."
+  (line-blame-mode 1))
 
 ;;; Commit details on hover
 

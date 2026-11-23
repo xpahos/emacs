@@ -9,6 +9,13 @@ pi-acp:
 	npm ci --prefix tools/pi-acp --ignore-scripts --no-audit --no-fund
 
 EMACS ?= /Applications/MacPorts/Emacs.app/Contents/MacOS/Emacs
+.PHONY: test-protobuf
+# Needs buf with `lsp serve' on PATH.
+test-protobuf:
+	python3 tests/protobuf-discovery-tests.py
+	$(EMACS) -Q --batch -l tests/protobuf-tests.el -f ert-run-tests-batch-and-exit
+	$(EMACS) -Q --batch -l tests/protobuf-smoke.el
+
 .PHONY: test-agent-scroll
 test-agent-scroll:
 	$(EMACS) -Q --batch -l tests/agent-scroll-tests.el -f ert-run-tests-batch-and-exit
@@ -110,4 +117,14 @@ test-disk-changes-gui:
 test-disk-changes-pixel-gui:
 	home=$$(mktemp -d -t emacs-disk-pixel) && \
 	EMACS_TEST_HOME=$$home $(EMACS) -Q -l $(CURDIR)/tests/gui-disk-changes-pixel-scroll.el; \
+	status=$$?; cat $$home/result 2>/dev/null; exit $$status
+
+.PHONY: test-project-search test-project-search-gui
+test-project-search:
+	$(EMACS) -Q --batch -l tests/project-search-tests.el -f ert-run-tests-batch-and-exit
+
+# GUI; needs gopls and go. Times ~/arc/cloudia/cloud/compute/go when present.
+test-project-search-gui:
+	home=$$(mktemp -d -t emacs-project-search) && \
+	EMACS_TEST_HOME=$$home $(EMACS) -Q -l $(CURDIR)/tests/gui-project-search-smoke.el; \
 	status=$$?; cat $$home/result 2>/dev/null; exit $$status

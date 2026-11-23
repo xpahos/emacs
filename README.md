@@ -27,7 +27,11 @@ Useful package defaults are listed separately in the shell table.
 | `C-c TAB o` | Alternative binding for opening a project. |
 | `C-c TAB k` | Alternative binding for closing a project tab. |
 | `C-c p o` | Find and open a file in the current project by name/path. |
-| `RET` in file search | Open the selected result. Wait if the list is still empty while indexing. |
+| `C-c p s` | Search Go symbols (functions, methods, types, variables, constants) in the current project. |
+| `↑` / `↓` or `C-p` / `C-n` in file/symbol search | Select the previous/next result. |
+| `RET` in file/symbol search | Open the selected file or symbol definition and close the dialog. |
+| `C-c C-r` in symbol search | Open the selected definition and show its references. |
+| `Esc` / `C-g` in file/symbol search | Close the dialog and return to the editor. |
 | `C-c p f` | Copy the current file's absolute path. |
 | `C-c p r` or `C-u C-c p f` | Copy the file's path relative to the project root. |
 | `F8` | Show or hide the Treemacs tree. |

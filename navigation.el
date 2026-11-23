@@ -8,6 +8,9 @@
                                           (file-name-directory load-file-name)))
 (setq eglot-documentation-renderer #'markdown-ts-view-mode)
 
+;; Documentation is shown explicitly with Command-hover, not in the echo area.
+(remove-hook 'eldoc-display-functions #'eldoc-display-in-echo-area)
+
 (set-face-attribute 'xref-match nil :inherit nil
                     :foreground "#173568" :background "#b1b0a9" :weight 'bold)
 

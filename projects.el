@@ -366,6 +366,9 @@ Each working copy's file list is saved under its own root."
       eglot-sync-connect nil)
 (add-to-list 'eglot-server-programs
              '((c-mode c-ts-mode c++-mode c++-ts-mode) "clangd"))
+(load (expand-file-name "protobuf.el" (file-name-directory (or load-file-name buffer-file-name))) nil t)
+(add-to-list 'eglot-server-programs
+             '((protobuf-mode :language-id "proto") . my-protobuf-eglot-contact))
 
 (cl-defmethod eglot-register-capability
   (_server (_method (eql workspace/didChangeWatchedFiles)) _id &rest _)
@@ -382,6 +385,8 @@ After an external checkout, use \\[eglot-reconnect]."
 (add-hook 'go-ts-mode-hook #'my-go-font-lock-setup)
 (add-hook 'go-ts-mode-hook #'eglot-ensure)
 (add-hook 'rust-ts-mode-hook #'eglot-ensure)
+(remove-hook 'protobuf-mode-hook #'eglot-ensure)
+(add-hook 'protobuf-mode-hook #'my-protobuf-eglot-setup)
 (dolist (hook '(c-mode-hook c++-mode-hook c-ts-mode-hook c++-ts-mode-hook))
   (add-hook hook #'eglot-ensure))
 
@@ -389,7 +394,8 @@ After an external checkout, use \\[eglot-reconnect]."
   (with-current-buffer buffer
     (when (derived-mode-p 'go-ts-mode)
       (my-go-font-lock-setup))
-    (when (derived-mode-p 'rust-ts-mode 'c-mode 'c++-mode 'c-ts-mode 'c++-ts-mode)
+    (when (derived-mode-p 'rust-ts-mode 'protobuf-mode
+                          'c-mode 'c++-mode 'c-ts-mode 'c++-ts-mode)
       (eglot-ensure))))
 
 ;; Translate the existing home tab when reloading without restarting Emacs.
