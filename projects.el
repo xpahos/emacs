@@ -369,6 +369,26 @@ Each working copy's file list is saved under its own root."
 (load (expand-file-name "protobuf.el" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (add-to-list 'eglot-server-programs
              '((protobuf-mode :language-id "proto") . my-protobuf-eglot-contact))
+(defun my-eglot-distinct-nickname (connect modes project &rest args)
+  "CONNECT with PROJECT named after its directory and a hash of its canonical root.
+jsonrpc names server buffers after the nickname, and working copies share a
+directory name: a shared buffer killed with one copy's server hung up the other's.
+Servers register only once initialized, so the name cannot depend on them."
+  (let* ((root (project-root project))
+         (true (file-name-as-directory (file-truename root)))
+         (label (project-name project))
+         ;; A directory-named project keeps one label across symlinked spellings.
+         (label (if (equal label (file-name-nondirectory (directory-file-name root)))
+                    (file-name-nondirectory (directory-file-name true))
+                  label))
+         (unique (format "%s<%s>" label (substring (secure-hash 'sha256 true) 0 6)))
+         (name (symbol-function 'project-name)))
+    (cl-letf (((symbol-function 'project-name)
+               (lambda (p) (if (eq p project) unique (funcall name p)))))
+      (apply connect modes project args))))
+
+(advice-add 'eglot--connect :around #'my-eglot-distinct-nickname)
+(load (expand-file-name "jvm.el" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 
 (cl-defmethod eglot-register-capability
   (_server (_method (eql workspace/didChangeWatchedFiles)) _id &rest _)

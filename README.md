@@ -172,3 +172,106 @@ commit) or is an ancestor of its upstream, and the store has no stashes or chang
 An Arc copy only counts as available when Arc lists it as mounted with its
 recorded store; an empty mount-point directory does not.
 
+
+## Java and Kotlin
+
+`jvm.el` (loaded from `projects.el`) connects Eglot automatically:
+`.kt`/`.kts` open in `kotlin-mode` (package `kotlin-mode` 20230123.1859, vendored in
+`elpa/`) with the official Kotlin LSP; `.java` opens in the built-in `java-mode` with
+Eclipse JDT LS. `M-.`/`M-,` and the references popup work as for other languages.
+Corfu pops up while typing and after `.`, using `eglot-completion-at-point` through a
+thin wrapper: Eglot 31 ignores a completion item's `command`, and Kotlin LSP inserts the
+chosen item and its import only through that command (its `textEdit` is empty). The
+wrapper runs the command of the item actually chosen, as resolved by
+`completionItem/resolve`, also when `*Completions*` passes a bare string.
+`M-.` on a library symbol (e.g. `yandex.cloud.spinnaker.dsl.Application`) opens the
+server's decompiled stub read-only, fetched with `workspace/textDocumentContent` from
+the server that returned the `jar:` definition; `M-,` returns.
+If a server or JDK is missing, the file still opens and the echo area says what to install.
+
+### Servers
+
+| Server | Version | Installed in | On `PATH` as |
+|---|---|---|---|
+| Kotlin LSP | 271.2085.0 (macOS arm64, SHA-256 `2d22388f…6b4a`) | `~/.local/share/kotlin-lsp/271.2085.0/` | `~/.local/bin/kotlin-lsp` → `bin/intellij-server` |
+| JDT LS | 1.63.0 (`202610191322`, SHA-256 checked) | `~/.local/share/jdtls/1.63.0/` | `~/.local/bin/jdtls` |
+
+download.jetbrains.com answers 451 from this network; fetch the Kotlin archive through
+a proxy and check it against the `sha256` in the signed Open VSX bundle
+`JetBrains.kotlin-server-0.0.86@darwin-arm64` (`extension/server-bundle.json`):
+
+```bash
+curl -fL --socks5-hostname localhost:30201 --cacert ~/.config/node/ca-bundle.pem -O https://download.jetbrains.com/language-server/kotlin-server/271.2085.0/kotlin-server-271.2085.0-aarch64.sit
+```
+
+### JDKs (nothing global is changed)
+
+- Gradle imports run on **JDK 17** (`my-jvm-gradle-java-version`): Gradle 7.4.2 does not
+  run on 23. Kotlin LSP gets it as `JAVA_HOME`; JDT LS as `java.import.gradle.java.home`.
+- Kotlin LSP itself runs on its bundled JetBrains Runtime 25.
+- JDT LS 1.63.0 needs **Java 25** (its README says 21, but its Eclipse bundles require
+  `JavaSE-25`). It runs on `my-jvm-jdtls-java-home`, or by default on the JetBrains
+  Runtime bundled with Kotlin LSP, so no system JDK 25 is installed (that would become
+  the default `java`).
+- `/usr/libexec/java_home -v N` returns another JDK with status 0 when N is absent, so
+  each JDK is checked against its `release` file.
+
+### State and caches
+
+One server per project root (the remembered project, not the whole Arc repository),
+with state keyed by the root's canonical path, so copies with the same directory name
+never share it:
+
+- `<user-emacs-directory>/jvm-servers/kotlin/<sha256>/` — Kotlin LSP `--system-path`.
+  Its index (`indexDir`) is in `index/` there; by default the server keys it under
+  `~/Library/Caches/JetBrains/` by root path, and a second server on the same copy
+  (e.g. a test run beside the live session) waits forever on its lock.
+- `<user-emacs-directory>/jvm-servers/jdtls/<sha256>/{data,configuration}/` — JDT LS
+  workspace and OSGi configuration (by default `jdtls` writes the installation's
+  shared `configuration/`).
+- Eglot names a server's buffers after the project name, and working copies share one:
+  stopping one copy's server killed the other's. `my-eglot-distinct-nickname`
+  (`projects.el`, all languages) names every server `<directory><hash>`, the hash taken
+  from the canonical root, so the name holds before initialization, across reconnects
+  and through symlinked spellings (e.g. `configuration-prod<a71d51>`).
+
+### Tests
+
+```bash
+make test-jvm
+```
+
+```bash
+make test-jvm-servers EMACS_TEST_JVM_GRADLE_TEMPLATE=$HOME/arc/cloudia/cloud/spinnaker/configuration-prod
+```
+
+```bash
+make test-jvm-configuration-prod EMACS_TEST_KOTLIN_ROOT=$HOME/arc/cloudia/cloud/spinnaker/configuration-prod
+```
+
+`test-jvm-servers` builds two Gradle projects named `demo` (wrapper and plugin
+repositories copied from the template) and checks, for each copy: Kotlin and Java
+cross-file definitions stay in that copy, member completion, the Kotlin import edit,
+four separate servers, shutdown on closing the tabs, and a fresh server after reopening.
+`test-jvm-configuration-prod` imports the real Gradle model (no project tasks run) and
+opens `Application` from the `spinnaker-dsl` jar at its declaration.
+
+### Reconnect, limitations, rollback
+
+- Neither server notices a file changed outside Emacs until it is visited or the
+  server reconnects (`M-x eglot-reconnect`), e.g. after an Arc checkout: Kotlin LSP
+  registers no watchers, and JDT LS's registration is declined like all client-side
+  watching (`projects.el`). Checked with an unopened file for 40 s.
+- Servers started before this naming was loaded keep their old names (and possibly
+  shared buffers) until `M-x eglot-reconnect`.
+- Dependency stubs are not Eglot-managed: no navigation from inside them.
+- Java → Kotlin navigation does not work (JDT LS does not read Kotlin); Kotlin → Java
+  does (Kotlin LSP indexes Java sources).
+- JDT LS and Kotlin LSP ignore LSP `exit`; Eglot kills each after its shutdown timeout,
+  so closing a project tab pauses for a few seconds per server.
+- Kotlin LSP 271.2085.0 is an EAP (alpha) build.
+- Rollback: remove the `jvm.el` line from `projects.el` (and `kotlin-mode` from
+  `install-packages.el` if wanted), then `M-x eglot-shutdown-all` or close the project
+  tabs. Removing caches is a separate step: `<user-emacs-directory>/jvm-servers/`,
+  `~/Library/Caches/JetBrains/` (indexes from before `indexDir`),
+  `~/.local/share/{kotlin-lsp,jdtls}/` and the two `~/.local/bin` links.

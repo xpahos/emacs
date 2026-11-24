@@ -1,0 +1,3 @@
+﻿package bom
+
+func WithBom() {}

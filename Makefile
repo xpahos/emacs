@@ -128,3 +128,18 @@ test-project-search-gui:
 	home=$$(mktemp -d -t emacs-project-search) && \
 	EMACS_TEST_HOME=$$home $(EMACS) -Q -l $(CURDIR)/tests/gui-project-search-smoke.el; \
 	status=$$?; cat $$home/result 2>/dev/null; exit $$status
+
+.PHONY: test-jvm test-jvm-servers test-jvm-configuration-prod
+test-jvm:
+	$(EMACS) -Q --batch -l tests/jvm-tests.el -f ert-run-tests-batch-and-exit
+
+# Needs kotlin-lsp, jdtls, JDK 17 and a Gradle checkout whose wrapper and plugin
+# repositories the fixtures reuse (EMACS_TEST_JVM_GRADLE_TEMPLATE).
+test-jvm-servers:
+	@test -n "$(EMACS_TEST_JVM_GRADLE_TEMPLATE)"
+	$(EMACS) -Q --batch -l tests/jvm-smoke.el
+
+# Imports the Gradle model of a configuration-prod copy; runs none of its tasks.
+test-jvm-configuration-prod:
+	@test -n "$(EMACS_TEST_KOTLIN_ROOT)"
+	$(EMACS) -Q --batch -l tests/jvm-configuration-prod-smoke.el

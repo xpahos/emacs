@@ -203,6 +203,86 @@
     (eglot-register-capability nil 'workspace/didChangeWatchedFiles "id"
                                :watchers [(:globPattern "**/*.go")])))
 
+(ert-deftest my-project-eglot-nickname-is-per-canonical-root ()
+  (let* ((base (file-truename (make-temp-file "nick-" t)))
+         (a (expand-file-name "a/demo/" base))
+         (b (expand-file-name "b/demo/" base))
+         (link (expand-file-name "link" base))
+         (other (cons 'transient (expand-file-name "other/" base)))
+         (connect (lambda (_modes project &rest _)
+                    (list (project-name project) (project-name other)))))
+    (unwind-protect
+        (progn
+          (make-directory a t) (make-directory b t)
+          (make-symbolic-link (directory-file-name a) link)
+          (let ((na (car (my-eglot-distinct-nickname connect nil (cons 'transient a)))))
+            (should (string-match-p "\\`demo<[0-9a-f]\\{6\\}>\\'" na))
+            (should-not (equal na (car (my-eglot-distinct-nickname connect nil (cons 'transient b)))))
+            (should (equal na (car (my-eglot-distinct-nickname connect nil (cons 'transient (concat link "/")))))))
+          ;; Only the connecting project is renamed.
+          (should (equal (cadr (my-eglot-distinct-nickname connect nil (cons 'transient a))) "other"))
+          (should (equal (project-name (cons 'transient a)) "demo")))
+      (delete-directory base t))))
+
+(define-derived-mode my-test-lsp-mode prog-mode "TestLSP")
+
+(ert-deftest my-project-concurrent-same-named-eglot-connections-stay-apart ()
+  ;; Eglot registers a server only after `initialize' answers, so two copies
+  ;; connecting at once could not see each other's names (shared buffers).
+  (let* ((base (file-truename (make-temp-file "eglot-race-" t)))
+         (fixture (expand-file-name "lsp-fixture.py" (file-name-directory (symbol-file 'my-test-lsp-mode))))
+         (eglot-server-programs `((my-test-lsp-mode . ("python3" "-I" ,fixture "1.5"))))
+         (eglot-sync-connect nil)
+         (eglot-autoreconnect nil)
+         (project--list nil)
+         (started nil)
+         (eglot-server-initialized-hook (list (lambda (s) (push s started))))
+         buffers)
+    (unwind-protect
+        (progn
+          (dolist (copy '("a" "b"))
+            (let ((root (expand-file-name (concat copy "/demo/") base)))
+              (make-directory root t)
+              (project-remember-project (cons 'transient root))
+              (with-current-buffer (find-file-noselect (expand-file-name "x.txt" root))
+                (my-test-lsp-mode)
+                (push (current-buffer) buffers)
+                (apply #'eglot--connect (eglot--guess-contact)))))
+          (should (= 2 (length started)))
+          (should (seq-every-p (lambda (s) (null (eglot--capabilities s))) started))
+          (should-not (cl-loop for v being the hash-values of eglot--servers-by-project
+                               thereis (seq-intersection v started)))
+          (let ((names (mapcar #'eglot-project-nickname started))
+                (outputs (mapcar (lambda (s) (process-buffer (jsonrpc--process s))) started)))
+            (should-not (equal (car names) (cadr names)))
+            (should-not (eq (car outputs) (cadr outputs))))
+          (let ((deadline (+ (float-time) 20)))
+            (while (and (seq-some (lambda (b) (not (buffer-local-value 'eglot--managed-mode b))) buffers)
+                        (< (float-time) deadline))
+              (accept-process-output nil 0.1)))
+          (dolist (b buffers) (should (buffer-local-value 'eglot--managed-mode b)))
+          (pcase-let ((`(,first ,second) started))
+            (eglot-shutdown first)
+            (accept-process-output nil 0.5)
+            (should (jsonrpc-running-p second))
+            (should (eq :json-false
+                        (or (jsonrpc-request second :test/ping nil :timeout 5) :json-false)))
+            (let ((name (eglot-project-nickname second)))
+              (eglot-reconnect second)
+              (let ((deadline (+ (float-time) 20)) new)
+                (while (and (not (setq new (car (gethash (eglot--project second) eglot--servers-by-project))))
+                            (< (float-time) deadline))
+                  (accept-process-output nil 0.1))
+                (should new)
+                (should-not (eq new second))
+                (should (equal (eglot-project-nickname new) name))
+                (eglot-shutdown new)))))
+      (dolist (s started) (when (jsonrpc-running-p s) (ignore-errors (eglot-shutdown s))))
+      (cl-loop for v being the hash-values of eglot--servers-by-project
+               do (dolist (s v) (when (jsonrpc-running-p s) (ignore-errors (eglot-shutdown s)))))
+      (dolist (b buffers) (when (buffer-live-p b) (kill-buffer b)))
+      (delete-directory base t))))
+
 (ert-deftest my-project-buried-file-still-belongs-to-project ()
   (my-test-projects
    (my-project-open test-root)

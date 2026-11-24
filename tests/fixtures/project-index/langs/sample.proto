@@ -1,0 +1,14 @@
+syntax = "proto3";
+package example.sample;
+
+// message NotAMessage {}
+message AllocRequest {
+  string name = 1;
+  message Inner { int32 id = 1; }
+  enum Mode { MODE_UNSPECIFIED = 0; MODE_FAST = 1; }
+  oneof choice { string text = 2; }
+}
+
+service Allocator {
+  rpc Allocate(AllocRequest) returns (AllocRequest);
+}
