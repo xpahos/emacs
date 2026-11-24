@@ -314,7 +314,7 @@ process object. Optional argument PARSE behaves as for
 (defun arcit-report-bug (&optional _ignored)
   "Open the page for reporting arcit bugs."
   (interactive)
-  (let ((base "https://st.yandex-team.ru/createTicket?queue=EMACS&_form=184644"))
+  (let ((base "https://st.netflix.com/createTicket?queue=EMACS&_form=184644"))
     (browse-url (if (derived-mode-p 'arcit-mode)
                     (concat base "&" (url-build-query-string
                                       `(("arcit-mode" ,(symbol-name major-mode)))))
@@ -1027,10 +1027,10 @@ if SHOW-STATUS is set."
   ((pr-id :type string)))
 
 (cl-defmethod arcit-visit-section-thing ((obj arcit-status-pr-section))
-  (browse-url (concat "https://a.yandex-team.ru/review/" (oref obj pr-id))))
+  (browse-url (concat "https://a.netflix.com/review/" (oref obj pr-id))))
 
 (cl-defmethod arcit-copy-section-thing ((obj arcit-status-pr-section))
-  (kill-new (format "https://a.yandex-team.ru/review/%s/details" (oref obj pr-id)))
+  (kill-new (format "https://a.netflix.com/review/%s/details" (oref obj pr-id)))
   (message "Copied URL of pull-request"))
 
 (defun convert-face-to-font-lock-face (str)
@@ -1388,9 +1388,9 @@ arcit-mount-path."
                       'button-data login
                       'action (lambda (login)
                                 (if (featurep 'ya-staff)
-                                    (progn (declare-function yandex-show-staff-profile nil)
-                                           (yandex-show-staff-profile login nil t))
-                                  (browse-url (concat "https://staff.yandex-team.ru/" login))))))
+                                    (progn (declare-function netflix-staff-profile nil)
+                                           (netflix-staff-profile login nil t))
+                                  (browse-url (concat "https://staff.netflix.com/" login))))))
 
 (defun arcit--insert-ticket-links (tickets)
   (let ((first t))
@@ -1399,7 +1399,7 @@ arcit-mount-path."
           (setq first nil)
         (insert ", "))
       (insert-text-button ticket
-                          'button-data (concat "https://st.yandex-team.ru/" ticket)
+                          'button-data (concat "https://st.netflix.com/" ticket)
                           'action #'browse-url))))
 
 (defun arcit-show-revision (commit)
@@ -1458,7 +1458,7 @@ arcit-mount-path."
           (when-let ((pr-id (map-nested-elt commit-data '(attributes pr.id))))
             (insert (string-pad "PR:" 10))
             (insert-text-button pr-id
-                                'button-data (concat "https://a.yandex-team.ru/review/" pr-id)
+                                'button-data (concat "https://a.netflix.com/review/" pr-id)
                                 'action #'browse-url)
             (insert "\n"))
 

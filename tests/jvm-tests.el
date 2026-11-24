@@ -266,12 +266,12 @@ CONTENT is the `workspace/textDocumentContent' reply, or an error message."
        (delete-directory dir t))))
 
 (defconst my-jvm-test-jar-uri
-  "jar:///cache/spinnaker-dsl-0.82.20.jar!/yandex/cloud/spinnaker/dsl/Application.class")
+  "jar:///cache/spinnaker-dsl-0.82.20.jar!/netflix/cloud/spinnaker/dsl/Application.class")
 
 (ert-deftest my-jvm-jar-definitions-open-read-only-server-content ()
   (my-jvm-test-definitions
       `(:uri ,my-jvm-test-jar-uri :range (:start (:line 2 :character 6) :end (:line 2 :character 17)))
-      "package yandex.cloud.spinnaker.dsl\n\nclass Application {\n}\n"
+      "package netflix.cloud.spinnaker.dsl\n\nclass Application {\n}\n"
     (let ((source (current-buffer)) (origin (point)))
       (xref-find-definitions "Application")
       (should-not (eq (current-buffer) source))

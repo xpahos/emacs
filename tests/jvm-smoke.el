@@ -30,7 +30,7 @@
 plugins { kotlin(\"jvm\") version \"1.7.10\" }
 repositories { mavenLocal(); bucket(\"central\"); mavenCentral() }
 fun RepositoryHandler.bucket(repo: String) = maven {
-    setUrl(\"https://bucket.yandex-team.ru/v1/maven/${repo}\")
+    setUrl(\"https://bucket.netflix.com/v1/maven/${repo}\")
     credentials(PasswordCredentials::class) {
         username = project.property(\"bucketUsername\").toString()
         password = project.property(\"bucketPassword\").toString()

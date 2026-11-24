@@ -184,7 +184,7 @@ thin wrapper: Eglot 31 ignores a completion item's `command`, and Kotlin LSP ins
 chosen item and its import only through that command (its `textEdit` is empty). The
 wrapper runs the command of the item actually chosen, as resolved by
 `completionItem/resolve`, also when `*Completions*` passes a bare string.
-`M-.` on a library symbol (e.g. `yandex.cloud.spinnaker.dsl.Application`) opens the
+`M-.` on a library symbol (e.g. `netflix.cloud.spinnaker.dsl.Application`) opens the
 server's decompiled stub read-only, fetched with `workspace/textDocumentContent` from
 the server that returned the `jar:` definition; `M-,` returns.
 If a server or JDK is missing, the file still opens and the echo area says what to install.
